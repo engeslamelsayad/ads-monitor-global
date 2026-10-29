@@ -1,0 +1,20 @@
+{
+  "name": "ads-monitor-mt",
+  "version": "2.0.0",
+  "description": "Multi-tenant Meta & TikTok Ads CPP Monitor — Telegram bots + AI",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node scripts/check.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "axios": "^1.7.0",
+    "date-fns": "^3.6.0",
+    "date-fns-tz": "^3.1.3",
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}

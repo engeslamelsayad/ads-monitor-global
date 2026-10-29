@@ -1,0 +1,122 @@
+# Ads Monitor — Multi-Tenant 🚀
+
+نسخة متعددة العملاء من نظام مراقبة CPP لإعلانات Meta و TikTok: سيرفر واحد بيشغّل بوت Telegram مستقل لكل عميل، وبيانات كل عميل معزولة ومشفرة.
+
+---
+
+## الفكرة في سطرين
+
+- **بوت أدمن مركزي (ليك إنت)**: منه بتضيف عميل جديد بأمر واحد من غير redeploy.
+- **بوت لكل عميل**: كل عميل بيربط حساباته بنفسه من `/setup`، والبوت بيكتشف منتجاته من الحملات ويقترح Max CPP لكل منتج.
+
+---
+
+## إضافة عميل جديد (3 دقايق)
+
+1. **@BotFather** ← `/newbot` ← خد التوكن
+2. **بوت الأدمن**: `/new_tenant <التوكن> <اسم العميل>` ← هيرجعلك لينك دعوة
+3. **العميل** يفتح اللينك ← يضغط Start ← البوت يوجهه لـ `/setup`:
+   - 🔵 **Meta**: يلصق System User Token ← البوت يعرض حساباته الإعلانية ← يختار بالأزرار
+   - 🎵 **TikTok**: يفتح لينك الربط ← يوافق ← يلصق اللينك اللي اتحوّل له
+   - 🔍 **الاكتشاف**: البوت يقرا الحملات اللي صرفت آخر 7 أيام، ويجمعها في منتجات، ويقترح Max CPP من الأداء الفعلي. العميل يعتمد كل منتج بزرار.
+
+لينكات الدعوة بتشتغل **مرة واحدة**. لإضافة ميديا باير: `/invite` من بوت العميل.
+
+### توكن Meta للعميل (System User)
+Business Settings ← Users ← System Users ← Add (Admin) ← Add Assets (الحسابات الإعلانية، Manage campaigns) ← Generate New Token ← `ads_management` + `ads_read` ← Never expire.
+
+---
+
+## أوامر بوت الأدمن
+
+| الأمر | الوظيفة |
+|------|---------|
+| `/new_tenant توكن اسم` | إضافة عميل وتشغيل بوته فوراً |
+| `/tenants` | كل العملاء وحالتهم |
+| `/tenant اسم` | تفاصيل عميل |
+| `/invite اسم` | لينك دعوة جديد |
+| `/pause_tenant` / `/resume_tenant` | إيقاف / تشغيل عميل |
+| `/remove_tenant اسم` | حذف عميل (بتأكيد) |
+| `/check_all` | فحص فوري لكل العملاء |
+| `/announce نص` | رسالة لكل مستخدمي كل العملاء |
+
+## أوامر بوت العميل
+
+| | |
+|---|---|
+| **متابعة** | `/status` `/top` `/worst` `/budget` `/product اسم` `/week اسم` |
+| **تحكم** | `/pause_product اسم` + أزرار الإيقاف والميزانية في التنبيهات |
+| **AI** | `/ask سؤال` |
+| **إعداد** | `/setup` `/discover` `/unmatched` |
+| **منتجات** | `/products` `/add_product` `/edit_cpp` `/remove_product` `/add_alias` `/remove_alias` |
+| **حسابات** | `/accounts` `/add_account` `/remove_account` |
+| **نظام** | `/settings` `/set` `/users` `/invite` `/add_user` `/remove_user` `/check` `/help` |
+
+### إعدادات `/set` لكل عميل
+`cooldown` · `buffer` · `min_purchases` · `high_spend` · `scale` · `budget_floor` · `report_time` · `currency` · `timezone`
+
+العملة والتوقيت بيتضبطوا تلقائياً من أول حساب Meta بيتربط.
+
+---
+
+## الموديلات
+
+| الاستخدام | الموديل |
+|---|---|
+| التقرير اليومي + تقرير 3 أيام | `claude-haiku-5-5` |
+| التحليل العميق + `/ask` + الاكتشاف | `claude-sonnet-5-5` |
+
+تتغير من `AI_MODEL_HEAVY` / `AI_MODEL_LIGHT` من غير تعديل كود. مفتاح Anthropic واحد مشترك، ولو الرصيد خلص بوت الأدمن بيبلغك.
+
+---
+
+## Deploy على Railway
+
+1. Repo جديد ← New Project ← Deploy from GitHub
+2. Variables (من `.env.example`):
+   - `ADMIN_BOT_TOKEN`: بوت جديد من BotFather للإدارة (**مش** بوت الكوزماتيكس الحالي)
+   - `ADMIN_CHAT_IDS`: الـ Chat ID بتاعك
+   - `ANTHROPIC_API_KEY`
+   - `ENCRYPTION_KEY`: 32+ حرف عشوائي. **ما تغيرهوش بعد أول تشغيل** وإلا التوكنات المحفوظة مش هتتفك
+   - `TIKTOK_APP_ID` / `TIKTOK_APP_SECRET` / `TIKTOK_REDIRECT_URI`
+3. **Volume**: Mount Path `/app/data` (إجباري: هنا كل بيانات العملاء)
+
+---
+
+## الأمان
+
+- توكنات البوتات وMeta وTikTok **مشفرة** (AES-256-GCM) على الـ Volume.
+- رسائل التوكنات بتتمسح من الشات فوراً بعد استلامها.
+- أي شخص مش مسجل البوت بيتجاهله بصمت.
+- كل إجراء (إيقاف/ميزانية) محتاج زر تأكيد، وباقي فريق العميل بيتبلغ بيه.
+
+---
+
+## الهيكل
+
+```
+src/
+├── index.js            ← التشغيل
+├── config.js           ← إعدادات السيرفر + القيم الافتراضية للعملاء
+├── scheduler.js        ← دورة كل 90 دقيقة + تقارير بتوقيت كل عميل
+├── core/
+│   ├── registry.js     ← سجل العملاء
+│   ├── tenant.js       ← نموذج العميل (إعدادات/منتجات/حسابات/مستخدمين)
+│   ├── store.js        ← تخزين JSON ذرّي — ملف لكل عميل
+│   ├── crypto.js       ← تشفير التوكنات
+│   └── engine.js       ← محرك الفحص (Meta + TikTok)
+├── meta/               ← client / data / actions
+├── tiktok/             ← client (+OAuth) / data / actions
+├── telegram/
+│   ├── admin.js        ← بوت الأدمن
+│   ├── runtime.js      ← تشغيل بوتات العملاء
+│   ├── commands.js     ← أوامر بوت العميل
+│   ├── setup.js        ← معالج /setup
+│   ├── handlers.js     ← الأزرار
+│   ├── alerts.js       ← التنبيهات والتقارير
+│   ├── messenger.js    ← الإرسال (fallback تلقائي لو Markdown اترفض)
+│   └── state.js
+├── discovery/discovery.js ← /discover و /unmatched
+└── ai/                 ← client / reports / assistant
+scripts/check.js        ← اختبار ذاتي بدون شبكة: npm run check
+```
