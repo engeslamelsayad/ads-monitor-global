@@ -151,6 +151,54 @@ const ok = (name) => { passed++; console.log('✅', name); };
   assert(!t.isAuthorized('666'));
   ok('invite link: single use');
 
-  console.log(`\n🎉 ${passed}/11 checks passed`);
+
+  // 12) اختيار الحسابات: 129 حساب → صفحات + بحث + حفظ
+  const setup = require('../src/telegram/setup');
+  const metaClient = require('../src/meta/client');
+  const accs = Array.from({ length: 129 }, (_, i) => ({ id: String(900000 + i), name: i === 120 ? 'Goldbloom Main' : `Account ${i}`, active: i % 3 !== 0, currency: 'EGP', timezone: 'Africa/Cairo' }));
+  metaClient.listAdAccounts = async () => accs;
+  const sentMsgs = [];
+  t.bot = {
+    sendMessage: async (id, text, o) => { sentMsgs.push({ text, kb: o?.reply_markup }); return { message_id: sentMsgs.length }; },
+    editMessageText: async (text, o) => { sentMsgs.push({ text, kb: o?.reply_markup }); return {}; },
+    deleteMessage: async () => {}
+  };
+  const st = require('../src/telegram/state');
+  await setup.handleText(t, { chat: { id: 890006956 }, message_id: 1, text: 'EAAB-new-token' }, { type: 'setup_meta_token' });
+  let last = sentMsgs[sentMsgs.length - 1];
+  const btns = (m) => m.kb.inline_keyboard.flat();
+  assert(last.text.includes('129 حساب') && last.text.includes('صفحة 1/17'), last.text);
+  assert(!btns(last).some(b => b.text.startsWith('✅')), 'nothing preselected with many accounts');
+  const pkey = btns(last).find(b => b.callback_data.startsWith('su:save:')).callback_data.split(':')[2];
+  const q = (data) => ({ data, message: { chat: { id: 890006956 }, message_id: 99 } });
+  await setup.handleCallback(t, q(`su:pg:${pkey}:16`));
+  last = sentMsgs[sentMsgs.length - 1];
+  assert(last.text.includes('صفحة 17/17'));
+  // بحث بالاسم
+  await setup.handleCallback(t, q(`su:find:${pkey}`));
+  await setup.handleText(t, { chat: { id: 890006956 }, message_id: 2, text: 'goldbloom' }, st.get(t, '890006956'));
+  last = sentMsgs[sentMsgs.length - 1];
+  const target = btns(last).find(b => b.text.includes('Goldbloom Main'));
+  assert(target && last.text.includes('1 نتيجة'));
+  await setup.handleCallback(t, q(target.callback_data));
+  last = sentMsgs[sentMsgs.length - 1];
+  assert(btns(last).some(b => b.text.startsWith('✅') && b.text.includes('Goldbloom')) && last.text.includes('مختار: 1'));
+  // بحث برقم الحساب مع act_
+  await setup.handleCallback(t, q(`su:find:${pkey}`));
+  await setup.handleText(t, { chat: { id: 890006956 }, message_id: 3, text: 'act_900005' }, st.get(t, '890006956'));
+  last = sentMsgs[sentMsgs.length - 1];
+  assert(btns(last).some(b => b.text.includes('Account 5')));
+  // رقم مش موجود → رسالة إرشاد
+  await setup.handleCallback(t, q(`su:find:${pkey}`));
+  await setup.handleText(t, { chat: { id: 890006956 }, message_id: 4, text: '123456789' }, st.get(t, '890006956'));
+  assert(sentMsgs.some(m => m.text.includes('مش ضمن الحسابات')));
+  // حفظ
+  await setup.handleCallback(t, q(`su:save:${pkey}`));
+  assert.deepStrictEqual(t.metaAccounts, ['900120']);
+  assert.strictEqual(t.metaToken, 'EAAB-new-token');
+  assert(btns(sentMsgs.find(m => m.text.includes('129'))).every(b => Buffer.byteLength(b.callback_data) <= 64));
+  ok('account picker: 129 accounts, pages, search by name/ID, save');
+
+  console.log(`\n🎉 ${passed}/12 checks passed`);
   fs.rmSync(process.env.DATA_DIR, { recursive: true, force: true });
 })().catch(err => { console.error('❌ CHECK FAILED:', err); process.exit(1); });

@@ -32,14 +32,77 @@ async function start(tenant, chatId) {
   return send(tenant, chatId, m.text, m.opts);
 }
 
-// ---------- اختيار الحسابات (أزرار ✅/⬜) ----------
-function selectionKeyboard(ctxKey, accounts, selected) {
-  const rows = accounts.slice(0, 40).map((a, i) => [{
-    text: `${selected.includes(a.id) ? '✅' : '⬜'} ${a.name || a.id}${a.active === false ? ' (غير نشط)' : ''}`.slice(0, 60),
-    callback_data: `su:tg:${ctxKey}:${i}`
-  }]);
-  rows.push([{ text: '💾 حفظ', callback_data: `su:save:${ctxKey}` }, { text: '❌ إلغاء', callback_data: 'cancel' }]);
-  return { inline_keyboard: rows };
+// ---------- اختيار الحسابات: صفحات + بحث (يدعم مئات الحسابات) ----------
+const PAGE_SIZE = 8;
+
+function normalize(s) { return String(s || '').toLowerCase().replace(/^act_/, '').trim(); }
+
+// الحسابات اللي تظهر حسب البحث أو فلتر "المختار فقط" — بترجع أرقامها في القائمة الأصلية
+function visibleIndices(ctx) {
+  const q = normalize(ctx.filter);
+  return ctx.accounts.map((a, i) => i).filter(i => {
+    const a = ctx.accounts[i];
+    if (ctx.onlySelected && !ctx.selected.includes(a.id)) return false;
+    return !q || normalize(a.name).includes(q) || String(a.id).includes(q);
+  });
+}
+
+function pickerView(ctxKey, ctx) {
+  const idxs = visibleIndices(ctx);
+  const pages = Math.max(1, Math.ceil(idxs.length / PAGE_SIZE));
+  const page = Math.min(Math.max(ctx.page || 0, 0), pages - 1);
+  const slice = idxs.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const plat = ctx.platform === 'meta' ? '🔵 Meta' : '🎵 TikTok';
+
+  let text = `${plat} — ${ctx.accounts.length} حساب متاح\n`;
+  text += `✅ مختار: ${ctx.selected.length}\n`;
+  if (ctx.filter) text += `🔍 بحث: "${ctx.filter}" ← ${idxs.length} نتيجة\n`;
+  if (ctx.onlySelected) text += `📋 بيعرض المختار بس\n`;
+  text += idxs.length ? `\nاضغط على الحساب لاختياره (صفحة ${page + 1}/${pages}):` : '\n⚠️ مفيش نتايج — جرّب كلمة تانية أو رقم الحساب';
+
+  const rows = slice.map(i => {
+    const a = ctx.accounts[i];
+    const label = `${ctx.selected.includes(a.id) ? '✅' : '⬜'} ${a.name || a.id}${a.active === false ? ' (غير نشط)' : ''}`;
+    return [{ text: label.slice(0, 58), callback_data: `su:tg:${ctxKey}:${i}` }];
+  });
+  if (pages > 1) {
+    rows.push([
+      { text: page > 0 ? '◀️ السابق' : '·', callback_data: page > 0 ? `su:pg:${ctxKey}:${page - 1}` : 'su:noop' },
+      { text: `${page + 1}/${pages}`, callback_data: 'su:noop' },
+      { text: page < pages - 1 ? 'التالي ▶️' : '·', callback_data: page < pages - 1 ? `su:pg:${ctxKey}:${page + 1}` : 'su:noop' }
+    ]);
+  }
+  const tools = [{ text: '🔍 بحث بالاسم أو الرقم', callback_data: `su:find:${ctxKey}` }];
+  if (ctx.filter || ctx.onlySelected) tools.push({ text: '✖️ عرض الكل', callback_data: `su:clr:${ctxKey}` });
+  else if (ctx.selected.length) tools.push({ text: `📋 المختار (${ctx.selected.length})`, callback_data: `su:only:${ctxKey}` });
+  rows.push(tools);
+  rows.push([
+    { text: `💾 حفظ (${ctx.selected.length})`, callback_data: `su:save:${ctxKey}` },
+    { text: '❌ إلغاء', callback_data: 'cancel' }
+  ]);
+  return { text, reply_markup: { inline_keyboard: rows } };
+}
+
+function sortAccounts(accounts) {
+  return [...accounts].sort((a, b) =>
+    (b.active !== false) - (a.active !== false) || String(a.name || a.id).localeCompare(String(b.name || b.id)));
+}
+
+// يبدأ جلسة اختيار: لو الحسابات قليلة (5 أو أقل) نختار النشط تلقائياً، غير كده نسيبها فاضية
+async function openPicker(tenant, chatId, platform, token, rawAccounts) {
+  const accounts = sortAccounts(rawAccounts);
+  const selected = accounts.length <= 5 ? accounts.filter(a => a.active !== false).map(a => a.id) : [];
+  const ctx = { platform, token: encrypt(token), accounts, selected, page: 0, filter: '', onlySelected: false };
+  const key = tenant.storeContext(ctx);
+  const v = pickerView(key, ctx);
+  return send(tenant, chatId, v.text, { plain: true, reply_markup: v.reply_markup });
+}
+
+function savePicker(tenant, key, ctx) { tenant.db.storeContext(key, { ...ctx, timestamp: Date.now() }); }
+
+async function refreshPicker(tenant, chatId, msgId, key, ctx) {
+  const v = pickerView(key, ctx);
+  return edit(tenant, chatId, msgId, v.text, { plain: true, reply_markup: v.reply_markup });
 }
 
 async function handleCallback(tenant, q) {
@@ -65,19 +128,41 @@ async function handleCallback(tenant, q) {
   }
 
   if (action === 'discover') return require('../discovery/discovery').start(tenant, chatId);
+  if (action === 'noop') return null;
 
   const ctx = tenant.getContext(key);
   if (!ctx) return send(tenant, chatId, '❌ انتهت الجلسة — ابدأ /setup من جديد', { plain: true });
 
   if (action === 'tg') {
     const acc = ctx.accounts[parseInt(idx)];
-    const sel = ctx.selected.includes(acc.id) ? ctx.selected.filter(x => x !== acc.id) : [...ctx.selected, acc.id];
-    tenant.db.storeContext(key, { ...ctx, selected: sel, timestamp: Date.now() });
-    return tenant.bot.editMessageReplyMarkup(selectionKeyboard(key, ctx.accounts, sel), { chat_id: chatId, message_id: msgId }).catch(() => {});
+    if (!acc) return null;
+    ctx.selected = ctx.selected.includes(acc.id) ? ctx.selected.filter(x => x !== acc.id) : [...ctx.selected, acc.id];
+    if (ctx.onlySelected && !ctx.selected.length) ctx.onlySelected = false;
+    savePicker(tenant, key, ctx);
+    return refreshPicker(tenant, chatId, msgId, key, ctx);
+  }
+
+  if (action === 'pg') {
+    ctx.page = parseInt(idx) || 0;
+    savePicker(tenant, key, ctx);
+    return refreshPicker(tenant, chatId, msgId, key, ctx);
+  }
+
+  if (action === 'find') {
+    state.set(tenant, chatId, { type: 'setup_find', key, msgId });
+    return send(tenant, chatId, '🔍 اكتب جزء من اسم الحساب أو رقمه (Account ID):', { plain: true });
+  }
+
+  if (action === 'clr' || action === 'only') {
+    ctx.filter = '';
+    ctx.onlySelected = action === 'only';
+    ctx.page = 0;
+    savePicker(tenant, key, ctx);
+    return refreshPicker(tenant, chatId, msgId, key, ctx);
   }
 
   if (action === 'save') {
-    if (!ctx.selected.length) return send(tenant, chatId, '⚠️ اختار حساب واحد على الأقل', { plain: true });
+    if (!ctx.selected.length) return send(tenant, chatId, '⚠️ اختار حساب واحد على الأقل — استخدم 🔍 بحث لو الحساب مش ظاهر', { plain: true });
     tenant.setCredential(ctx.platform === 'meta' ? 'metaToken' : 'tiktokToken', decrypt(ctx.token));
     tenant.setAccounts(ctx.platform, ctx.selected);
 
@@ -109,6 +194,22 @@ async function handleText(tenant, msg, st) {
   // مسح رسالة التوكن من الشات فوراً (أمان)
   tenant.bot.deleteMessage(chatId, msg.message_id).catch(() => {});
 
+  if (st.type === 'setup_find') {
+    state.clear(tenant, chatId);
+    const ctx = tenant.getContext(st.key);
+    if (!ctx) return send(tenant, chatId, '❌ انتهت الجلسة — ابدأ /setup من جديد', { plain: true });
+    ctx.filter = input.slice(0, 60);
+    ctx.onlySelected = false;
+    ctx.page = 0;
+    savePicker(tenant, st.key, ctx);
+    if (!visibleIndices(ctx).length && /^(act_)?\d{6,}$/.test(input)) {
+      await send(tenant, chatId,
+        `⚠️ الحساب ${normalize(input)} مش ضمن الحسابات اللي التوكن ده يقدر يوصلها.\n` +
+        `ضيفه للـ System User من Business Settings ← System Users ← Add Assets، وبعدين اعمل /setup تاني.`, { plain: true });
+    }
+    return refreshPicker(tenant, chatId, st.msgId, st.key, ctx);
+  }
+
   if (st.type === 'setup_meta_token') {
     await send(tenant, chatId, '🔐 استلمت التوكن ومسحته من الشات — جاري التحقق...', { plain: true });
     let accounts;
@@ -119,10 +220,7 @@ async function handleText(tenant, msg, st) {
     }
     state.clear(tenant, chatId);
     if (!accounts.length) return send(tenant, chatId, '⚠️ التوكن سليم بس مفيش حسابات إعلانية مضافة للـ System User.\nضيف الحسابات من Add Assets وابعت التوكن تاني /setup', { plain: true });
-    const selected = accounts.filter(a => a.active).map(a => a.id);
-    const key = tenant.storeContext({ platform: 'meta', token: encrypt(input), accounts, selected });
-    return send(tenant, chatId, `🔵 لقيت ${accounts.length} حساب — اختار اللي عايز تراقبه:`,
-      { plain: true, reply_markup: selectionKeyboard(key, accounts, selected) });
+    return openPicker(tenant, chatId, 'meta', input, accounts);
   }
 
   if (st.type === 'setup_tiktok_code') {
@@ -139,9 +237,7 @@ async function handleText(tenant, msg, st) {
       return send(tenant, chatId, `❌ فشل الربط: ${err.message}\n\nالكود صالح لدقايق قليلة — اطلب لينك جديد من /setup`, { plain: true });
     }
     state.clear(tenant, chatId);
-    const key = tenant.storeContext({ platform: 'tiktok', token: encrypt(token), accounts, selected: accounts.map(a => a.id) });
-    return send(tenant, chatId, `🎵 لقيت ${accounts.length} حساب — اختار اللي عايز تراقبه:`,
-      { plain: true, reply_markup: selectionKeyboard(key, accounts, accounts.map(a => a.id)) });
+    return openPicker(tenant, chatId, 'tiktok', token, accounts);
   }
 }
 
