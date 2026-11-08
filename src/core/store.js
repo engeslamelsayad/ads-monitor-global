@@ -59,7 +59,8 @@ function emptyTenantData() {
     breaches: {},         // "product:date" → row
     state: {},            // key → string
     contexts: {},         // ctxKey → { ..., timestamp }
-    actions: []           // سجل الإجراءات (مين عمل إيه وإمتى)
+    actions: [],          // سجل الإجراءات (مين عمل إيه وإمتى)
+    rules: []             // القواعد التلقائية
   };
 }
 

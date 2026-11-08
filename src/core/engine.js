@@ -9,7 +9,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const ageInDays = (iso) => (iso ? Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86400000)) : null);
 
 // ---------- جمع البيانات: Meta ----------
-async function collectMeta(tenant, unmatched) {
+async function collectMeta(tenant, unmatched, diag = {}) {
   const items = [];
   for (const accountId of tenant.metaAccounts) {
     try {
@@ -18,13 +18,14 @@ async function collectMeta(tenant, unmatched) {
         metaData.getAdsetInsightsToday(tenant, accountId)
       ]);
       const byId = Object.fromEntries(adsets.map(a => [a.id, a]));
-      let n = 0;
+      let n = 0, notActive = 0, um = 0;
       for (const row of insights) {
         const adset = byId[row.adset_id];
-        if (!adset) continue; // متوقف يدوياً
+        if (!adset) { notActive++; continue; } // متوقف يدوياً
         const product = tenant.matchProduct(row.campaign_name);
         if (!product) {
           unmatched[`meta:${row.campaign_id}`] = { platform: 'meta', account: accountId, name: row.campaign_name, spend: parseFloat(row.spend || 0) };
+          um++;
           continue;
         }
         items.push({
@@ -37,9 +38,11 @@ async function collectMeta(tenant, unmatched) {
         });
         n++;
       }
-      tenant.log.info(`Meta ${accountId}: ${n} adsets`);
+      diag[`meta:${accountId}`] = { platform: 'meta', id: accountId, active: adsets.length, spending: insights.length, matched: n, unmatched: um, notActive };
+      tenant.log.info(`Meta ${accountId}: ${n} adsets (active ${adsets.length} | spending today ${insights.length} | unmatched ${um} | not active ${notActive})`);
     } catch (err) {
       if (err.message === 'META_TOKEN_EXPIRED') throw err;
+      diag[`meta:${accountId}`] = { platform: 'meta', id: accountId, error: String(err.message).slice(0, 160) };
       tenant.log.error(`Meta account ${accountId} failed`, err);
     }
   }
@@ -47,7 +50,7 @@ async function collectMeta(tenant, unmatched) {
 }
 
 // ---------- جمع البيانات: TikTok ----------
-async function collectTiktok(tenant, unmatched) {
+async function collectTiktok(tenant, unmatched, diag = {}) {
   const items = [];
   for (const adv of tenant.tiktokAdvertisers) {
     try {
@@ -58,7 +61,7 @@ async function collectTiktok(tenant, unmatched) {
       ]);
       const camps = Object.fromEntries(campaigns.map(c => [c.campaign_id, c]));
       const ags = Object.fromEntries(adgroups.map(a => [a.adgroup_id, a]));
-      let n = 0;
+      let n = 0, um = 0;
       for (const row of insights) {
         const ag = ags[row.dimensions?.adgroup_id];
         if (!ag) continue;
@@ -68,6 +71,7 @@ async function collectTiktok(tenant, unmatched) {
         const product = tenant.matchProduct(campName) || tenant.matchProduct(ag.adgroup_name);
         if (!product) {
           unmatched[`tiktok:${ag.campaign_id}`] = { platform: 'tiktok', account: adv, name: campName, spend: parseFloat(row.metrics?.spend || 0) };
+          um++;
           continue;
         }
         items.push({
@@ -80,9 +84,11 @@ async function collectTiktok(tenant, unmatched) {
         });
         n++;
       }
-      tenant.log.info(`TikTok ${adv}: ${n} adgroups`);
+      diag[`tiktok:${adv}`] = { platform: 'tiktok', id: adv, active: adgroups.length, spending: insights.length, matched: n, unmatched: um };
+      tenant.log.info(`TikTok ${adv}: ${n} adgroups (spending today ${insights.length} | unmatched ${um})`);
     } catch (err) {
       if (err.message === 'TIKTOK_TOKEN_EXPIRED') throw err;
+      diag[`tiktok:${adv}`] = { platform: 'tiktok', id: adv, error: String(err.message).slice(0, 160) };
       tenant.log.error(`TikTok advertiser ${adv} failed`, err);
     }
   }
@@ -99,6 +105,7 @@ async function runCycle(tenant) {
   const s = tenant.settings;
   const today = tenant.today();
   const unmatched = {};
+  const diag = {};
   const scaledProducts = new Set(); // Scale alert واحد لكل منتج لكل منصة في الدورة
   let alerts = 0, scales = 0;
 
@@ -108,7 +115,7 @@ async function runCycle(tenant) {
       const enabled = platform === 'meta' ? tenant.setupStatus.meta : tenant.setupStatus.tiktok;
       if (!enabled) continue;
       try {
-        items.push(...await fn(tenant, unmatched));
+        items.push(...await fn(tenant, unmatched, diag));
       } catch (err) {
         if (/TOKEN_EXPIRED/.test(err.message)) {
           await notifyTokenExpired(tenant, platform, sendToAll);
@@ -158,11 +165,17 @@ async function runCycle(tenant) {
       }
     }
 
+    // القواعد التلقائية اللي العميل عملها من الداشبورد
+    let rulesFired = 0;
+    try { rulesFired = (await require('./rules').evaluate(tenant, items.filter(i => i.metrics.spend))).fired; }
+    catch (err) { tenant.log.error('Rules evaluation failed', err); }
+
     // حفظ الحملات غير المطابقة لأمر /unmatched
     tenant.db.setState('unmatched', JSON.stringify({ at: Date.now(), list: Object.values(unmatched) }));
     tenant.db.setState('last_cycle', String(Date.now()));
+    tenant.db.setState('last_cycle_diag', JSON.stringify({ at: Date.now(), accounts: diag }));
     tenant.log.info(`Cycle done — ${items.length} items | ${alerts} alerts | ${scales} scale | ${Object.keys(unmatched).length} unmatched`);
-    return { items: items.length, alerts, scales, unmatched: Object.keys(unmatched).length };
+    return { items: items.length, alerts, scales, rules: rulesFired, unmatched: Object.keys(unmatched).length };
   } finally {
     tenant.cycleRunning = false;
   }

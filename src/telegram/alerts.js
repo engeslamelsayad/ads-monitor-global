@@ -46,7 +46,10 @@ async function sendStatus(tenant, chatId) {
   const last = parseInt(tenant.db.getState('last_cycle', '0'));
   let t = `${tenant.isReady ? '🟢 النظام يعمل' : '🟡 الإعداد غير مكتمل — اكتب /setup'}\n`;
   t += `⏰ ${time.dateTimeString(tenant.tz)}\n`;
-  if (last) t += `🔄 آخر فحص: ${Math.round((Date.now() - last) / 60000)} دقيقة\n`;
+  if (last) t += `🔄 آخر فحص: من ${Math.round((Date.now() - last) / 60000)} دقيقة\n`;
+  if (tenant.isReady) t += `⏭️ الفحص الجاي: ${time.formatTs(Math.max(tenant.nextCycleAt, Date.now()), tenant.tz)} (كل ${tenant.settings.intervalMinutes} دقيقة)\n`;
+  const diag = diagLines(tenant);
+  if (diag) t += `\n${diag}\n`;
   t += `\n🔵 Meta: ${s.meta ? `${tenant.metaAccounts.length} حساب` : 'غير مربوط'}`;
   t += ` | 🎵 TikTok: ${s.tiktok ? `${tenant.tiktokAdvertisers.length} حساب` : 'غير مربوط'}\n`;
   t += `📦 المنتجات: ${tenant.products.length}\n\n`;
@@ -61,6 +64,23 @@ async function sendStatus(tenant, chatId) {
   }
   t += `\n💰 الإجمالي: ${fmt.money(ts)} ${cur} | 🛒 ${Math.round(tp)} | CPP ${tp ? (ts / tp).toFixed(1) : '—'}`;
   return send(tenant, chatId, t, { plain: true });
+}
+
+// تشخيص آخر دورة: حسابات مفيهاش أي Ad Set بيصرف — عشان العميل يعرف ليه مفيش تنبيهات
+function diagLines(tenant) {
+  let d;
+  try { d = JSON.parse(tenant.db.getState('last_cycle_diag', '{}')); } catch { return ''; }
+  const empty = Object.values(d.accounts || {}).filter(a => !a.error && a.matched === 0);
+  const failed = Object.values(d.accounts || {}).filter(a => a.error);
+  const out = [];
+  for (const a of empty) {
+    out.push(a.spending === 0
+      ? `⚠️ ${a.platform === 'tiktok' ? 'TikTok' : 'Meta'} ${a.id}: مفيش Ad Sets صرفت النهارده (${a.active} نشط)`
+      : a.unmatched ? `⚠️ ${a.platform === 'tiktok' ? 'TikTok' : 'Meta'} ${a.id}: ${a.spending} Ad Set بيصرف بس ولا واحد متطابق مع منتج — /unmatched`
+        : `⚠️ ${a.platform === 'tiktok' ? 'TikTok' : 'Meta'} ${a.id}: ${a.spending} Ad Set صرفوا النهارده بس حالتهم مش Active دلوقتي`);
+  }
+  for (const a of failed) out.push(`❌ ${a.platform === 'tiktok' ? 'TikTok' : 'Meta'} ${a.id}: ${a.error}`);
+  return out.join('\n');
 }
 
 async function sendBudget(tenant, chatId) {

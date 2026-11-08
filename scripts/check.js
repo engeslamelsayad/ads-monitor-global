@@ -128,7 +128,7 @@ const ok = (name) => { passed++; console.log('✅', name); };
   const cmds = ['/status', '/top', '/worst', '/budget', '/product خرز', '/week خرز', '/pause_product خرز', '/check', '/ask سؤال',
     '/setup', '/discover', '/unmatched', '/products', '/add_product سم النحل 90', '/edit_cpp خرز 60', '/remove_product خرز',
     '/add_alias خرز = beads', '/remove_alias خرز = beads', '/accounts', '/add_account meta 123', '/remove_account meta 123',
-    '/settings', '/set cooldown 4', '/users', '/invite', '/add_user 123456', '/remove_user 123456', '/help', '/start abc'];
+    '/settings', '/set cooldown 4', '/decisions', '/rules', '/users', '/invite', '/add_user 123456', '/remove_user 123456', '/help', '/start abc'];
   const unhandled = cmds.filter(c => !handlersMap.some(([re]) => re.test(c)));
   assert.deepStrictEqual(unhandled, []);
   // /products ما يتلخبطش مع /product
@@ -312,9 +312,84 @@ const ok = (name) => { passed++; console.log('✅', name); };
   // الواجهة نفسها + الهيدرز الأمنية
   const page = await req('GET', '/', { csrf: false });
   assert(page.status === 200 && page.text.includes('app.js') && page.headers['content-security-policy'] && page.headers['x-frame-options'] === 'DENY');
+
+  // 15) متابعة القرار + القواعد + الإجراءات الجماعية + التحليل
+  {
+    const oc = require('../src/core/outcomes');
+    const rules = require('../src/core/rules');
+    const time = require('../src/utils/time');
+    const D = t.daysAgo(5);
+    const seed = (id, date, spend, purchases) => t.db.upsertDailyMetrics(date, id, { product_name: 'خرز', adset_name: id, account_id: '111', platform: 'meta', campaign_id: 'c1', campaign_name: 'خرز camp', spend, purchases, daily_budget: 300 });
+    for (let i = 1; i <= 3; i++) {
+      seed('o1', time.shiftDate(D, -i), 300, 6); seed('o1', time.shiftDate(D, i), 500, 12); // نجاح: مبيعات أكتر و CPP أقل
+      seed('o2', time.shiftDate(D, -i), 300, 6); seed('o2', time.shiftDate(D, i), 500, 4);  // فشل
+    }
+    const at = Date.now() - 5 * 86400000;
+    t.db.mutate(d => {
+      d.actions.push({ at, via: 'telegram', by: '1', action: 'budget_up', adset: 'o1', adsetId: 'o1', product: 'خرز', platform: 'meta', pct: 40, from: 300, to: 420 });
+      d.actions.push({ at: at + 1, via: 'dashboard', by: '1', action: 'budget_up', adset: 'o2', adsetId: 'o2', product: 'خرز', platform: 'meta', pct: 40, from: 300, to: 420 });
+      d.actions.push({ at: Date.now() - 86400000, via: 'telegram', by: '1', action: 'budget_down', adset: 'o1', adsetId: 'o1', product: 'خرز', platform: 'meta', pct: -20 });
+    });
+    const list = oc.computeOutcomes(t);
+    const o1 = list.find(o => o.adsetId === 'o1' && o.action === 'budget_up');
+    const o2 = list.find(o => o.adsetId === 'o2');
+    assert.strictEqual(o1.verdict, 'success'); assert.strictEqual(o1.before.cpp, 50); assert.strictEqual(o1.status, 'final');
+    assert.strictEqual(o2.verdict, 'fail');
+    assert.strictEqual(list.find(o => o.action === 'budget_down').status, 'pending');
+    assert(oc.describe(o1, 'ج.م').includes('من 50 لـ'));
+    assert.strictEqual(oc.collectNewFinals(t).length, 2); assert.strictEqual(oc.collectNewFinals(t).length, 0, 'notify once');
+    const ocApi = await req('GET', '/api/outcomes', { cookie });
+    assert(ocApi.status === 200 && ocApi.json.summary.budget_up.success === 1 && ocApi.json.summary.budget_up.fail === 1);
+
+    // القواعد
+    assert.throws(() => rules.validateRule(t, { condition: 'cpp_below', threshold: 60, action: 'budget_up', pct: 80, mode: 'auto' }), /50%/);
+    const hist = [{ date: t.daysAgo(1), spend: 400, purchases: 4 }, { date: t.today(), spend: 300, purchases: 2 }];
+    const maxX = t.products.find(p => p.name === 'خرز').maxCpp;
+    const r130 = { condition: 'cpp_above', threshold: 100 * 90 / maxX, days: 2 };
+    assert(rules.conditionMet({ ...r130, threshold: 120 }, hist, 60, t.settings));        // 100 & 150 > 72
+    assert(!rules.conditionMet({ ...r130, threshold: 120, days: 3 }, hist, 60, t.settings)); // مفيش 3 أيام
+    assert(!rules.conditionMet({ condition: 'cpp_above', threshold: 120, days: 2 }, [{ date: t.daysAgo(2), spend: 400, purchases: 4 }, hist[1]], 60, t.settings), 'must be consecutive');
+    const add = await req('POST', '/api/rules', { cookie, body: { condition: 'cpp_above', threshold: 120, days: 1, action: 'budget_down', pct: 30, mode: 'auto' } });
+    assert.strictEqual(add.status, 200);
+    const addC = await req('POST', '/api/rules', { cookie, body: { condition: 'cpp_above', threshold: 120, days: 1, action: 'pause', mode: 'confirm', name: 'وقف' } });
+    assert.strictEqual(addC.status, 200);
+    notified.length = 0;
+    const item = { platform: 'meta', accountId: '111', adsetKey: 'r1', product: t.products.find(p => p.name === 'خرز'),
+      campaign: { id: 'c1', name: 'خرز camp' }, adset: { id: 'r1', name: 'r1 adset', dailyBudget: 300 }, metrics: { spend: 300, purchases: 1 } };
+    seed('r1', t.today(), 300, 1);
+    const ev = await rules.evaluate(t, [item]);
+    assert.strictEqual(ev.fired, 2);
+    assert(t.recentActions(5).some(a => a.via === 'rule' && a.action === 'budget_down' && a.adsetId === 'r1'), 'auto rule executed');
+    assert(notified.some(([, txt]) => txt.includes('قاعدة تلقائية')));
+    assert.strictEqual((await rules.evaluate(t, [item])).fired, 0, 'rule cooldown');
+    const rl = await req('GET', '/api/rules', { cookie });
+    assert(rl.json.rules.length === 2 && rl.json.rules[0].fires.count === 1);
+    assert.strictEqual((await req('PUT', `/api/rules/${rl.json.rules[0].id}`, { cookie, body: { ...rl.json.rules[0], enabled: false } })).json.rule.enabled, false);
+    assert.strictEqual((await req('DELETE', `/api/rules/${rl.json.rules[1].id}`, { cookie })).status, 200);
+
+    // جماعي: إشعار واحد
+    notified.length = 0;
+    const bulk = await req('POST', '/api/adsets/bulk', { cookie, body: { ids: ['a1', 'o1', 'nope'], op: 'budget', pct: -20 } });
+    assert(bulk.status === 200 && bulk.json.ok.length === 2 && bulk.json.failed.length === 1);
+    assert.strictEqual(new Set(notified.map(([, txt]) => txt)).size, 1, 'one summary message');
+    assert.strictEqual((await req('POST', '/api/adsets/bulk', { cookie, body: { ids: ['a1'], op: 'budget', pct: 500 } })).status, 400);
+
+    // التحليل
+    const tr = await req('GET', `/api/trend?product=${encodeURIComponent('خرز')}&days=14`, { cookie });
+    assert(tr.status === 200 && tr.json.days.length === 14 && tr.json.actions.length >= 2);
+    const cmp = await req('GET', '/api/compare?days=3', { cookie });
+    assert(cmp.status === 200 && cmp.json.products.length && cmp.json.current.to === t.daysAgo(1));
+    // الفحص الدوري: من آخر محاولة محفوظة
+    t.db.setState('last_cycle_attempt', String(Date.now()));
+    assert(Math.abs(t.nextCycleAt - (Date.now() + t.settings.intervalMinutes * 60000)) < 2000);
+    assert.strictEqual((await req('PUT', '/api/settings', { cookie, body: { values: { interval: 20 } } })).status, 400);
+    assert.strictEqual((await req('PUT', '/api/settings', { cookie, body: { values: { interval: 60 } } })).status, 200);
+    assert.strictEqual(t.settings.intervalMinutes, 60);
+    ok('decisions before/after + notify once, rules (auto/confirm/cooldown/consecutive), bulk, trend, compare, interval');
+  }
   srv.close();
   ok('dashboard API: magic link single-use, CSRF, permissions, products, settings, budget action + team notify, admin switch');
 
-  console.log(`\n🎉 ${passed}/14 checks passed`);
+  console.log(`\n🎉 ${passed}/15 checks passed`);
   fs.rmSync(process.env.DATA_DIR, { recursive: true, force: true });
 })().catch(err => { console.error('❌ CHECK FAILED:', err); process.exit(1); });

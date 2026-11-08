@@ -71,7 +71,14 @@ router.get('/overview', wrap((req) => {
     adsets: p.adsets.size, metaCpp: cpp(p.meta), tiktokCpp: cpp(p.tiktok), metaSpend: r2(p.meta.spend), tiktokSpend: r2(p.tiktok.spend)
   })).sort((a, b) => b.spend - a.spend);
 
+  const time = require('../utils/time');
+  const recentActs = {};
+  for (const ac of t.db.load().actions || []) {
+    if (!ac.adsetId || !['pause', 'budget_up', 'budget_down'].includes(ac.action) || Date.now() - ac.at > 7 * 86400000) continue;
+    recentActs[ac.adsetId] = { action: ac.action, pct: ac.pct ?? null, at: ac.at, day: time.dateOf(ac.at, t.tz) };
+  }
   const adsetList = Object.values(adsets).map(a => ({
+    lastAction: recentActs[a.id] || null,
     ...a, spend: r2(a.spend), cpp: cpp(a), maxCpp: maxOf(a.product) ?? null,
     ctr: a.impressions ? r2((a.clicks / a.impressions) * 100) : null,
     ageDays: a.createdAt ? Math.floor((Date.now() - new Date(a.createdAt)) / 86400000) : null,
@@ -91,6 +98,9 @@ router.get('/overview', wrap((req) => {
     unmatched: unmatched.sort((a, b) => b.spend - a.spend),
     settings: { bufferPct: t.settings.bufferPct, scalePct: t.settings.scalePct },
     lastCycle: parseInt(t.db.getState('last_cycle', '0')) || null,
+    nextCycle: Math.max(t.nextCycleAt, Date.now()),
+    intervalMinutes: t.settings.intervalMinutes,
+    diag: (() => { try { return Object.values(JSON.parse(t.db.getState('last_cycle_diag', '{}')).accounts || {}); } catch { return []; } })(),
     cycleRunning: t.cycleRunning
   };
 }));
@@ -320,6 +330,215 @@ router.post('/discovery/apply', wrap((req) => {
     } catch (err) { done.failed.push(`${g.name}: ${err.message}`); }
   }
   return { ...done, products: t.products, ready: t.isReady };
+}));
+
+// ==================== متابعة نتيجة القرار ====================
+router.get('/outcomes', wrap((req) => {
+  const t = need(req);
+  const oc = require('../core/outcomes');
+  const window = Math.min(Math.max(parseInt(req.query.window) || 3, 2), 7);
+  const list = oc.computeOutcomes(t, { window, limit: 200 });
+  return { window, list, summary: oc.summarize(list) };
+}));
+
+// ==================== رسم الاتجاه لمنتج ====================
+router.get('/trend', wrap((req) => {
+  const t = need(req);
+  const days = Math.min(Math.max(parseInt(req.query.days) || 30, 7), 120);
+  const from = t.daysAgo(days - 1), to = t.today();
+  const names = [...new Set(t.db.rows().map(r => r.product_name))];
+  const product = String(req.query.product || '') || t.products[0]?.name || names[0] || null;
+  const byDate = {};
+  for (let i = days - 1; i >= 0; i--) { const d = t.daysAgo(i); byDate[d] = { date: d, spend: 0, purchases: 0, metaSpend: 0, tiktokSpend: 0 }; }
+  for (const r of t.db.rows()) {
+    if (r.product_name !== product || r.date < from || r.date > to || !byDate[r.date]) continue;
+    const d = byDate[r.date];
+    d.spend += r.spend || 0; d.purchases += r.purchases || 0;
+    if ((r.platform || (String(r.adset_id).startsWith('tt_') ? 'tiktok' : 'meta')) === 'tiktok') d.tiktokSpend += r.spend || 0; else d.metaSpend += r.spend || 0;
+  }
+  const time = require('../utils/time');
+  const acts = (t.db.load().actions || []).filter(a => a.product === product && ['pause', 'budget_up', 'budget_down', 'product_cpp', 'product_edit'].includes(a.action))
+    .map(a => ({ ...a, date: time.dateOf(a.at, t.tz) })).filter(a => a.date >= from);
+  return {
+    product, products: [...new Set([...t.products.map(p => p.name), ...names])],
+    maxCpp: t.products.find(p => p.name === product)?.maxCpp ?? null,
+    days: Object.values(byDate).map(d => ({ ...d, spend: r2(d.spend), metaSpend: r2(d.metaSpend), tiktokSpend: r2(d.tiktokSpend), cpp: d.purchases ? r2(d.spend / d.purchases) : null })),
+    actions: acts
+  };
+}));
+
+// ==================== مقارنة فترتين ====================
+router.get('/compare', wrap((req) => {
+  const t = need(req);
+  const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 45);
+  const includeToday = req.query.today === '1';
+  const off = includeToday ? 0 : 1;
+  const cur = { from: t.daysAgo(off + days - 1), to: t.daysAgo(off) };
+  const prev = { from: t.daysAgo(off + 2 * days - 1), to: t.daysAgo(off + days) };
+  const agg = {};
+  const blank = () => ({ spend: 0, purchases: 0 });
+  for (const r of t.db.rows()) {
+    const slot = r.date >= cur.from && r.date <= cur.to ? 'cur' : r.date >= prev.from && r.date <= prev.to ? 'prev' : null;
+    if (!slot) continue;
+    const p = agg[r.product_name] ||= { name: r.product_name, cur: blank(), prev: blank() };
+    p[slot].spend += r.spend || 0; p[slot].purchases += r.purchases || 0;
+  }
+  const fin = (x) => ({ spend: r2(x.spend), purchases: x.purchases, cpp: x.purchases ? r2(x.spend / x.purchases) : null });
+  const ch = (a, b) => (a == null || b == null || !a ? null : Math.round(((b - a) / a) * 100));
+  const mk = (p) => {
+    const c = fin(p.cur), v = fin(p.prev);
+    return { name: p.name, maxCpp: t.products.find(x => x.name === p.name)?.maxCpp ?? null, cur: c, prev: v,
+      change: { spend: ch(v.spend, c.spend), purchases: ch(v.purchases, c.purchases), cpp: ch(v.cpp, c.cpp) } };
+  };
+  const products = Object.values(agg).map(mk).sort((a, b) => b.cur.spend - a.cur.spend);
+  const tot = Object.values(agg).reduce((a, p) => {
+    a.cur.spend += p.cur.spend; a.cur.purchases += p.cur.purchases; a.prev.spend += p.prev.spend; a.prev.purchases += p.prev.purchases; return a;
+  }, { name: 'الإجمالي', cur: blank(), prev: blank() });
+  return { days, includeToday, current: cur, previous: prev, products, totals: mk(tot) };
+}));
+
+// ==================== كاش بسيط للاستعلامات التقيلة من الـ APIs ====================
+const cache = new Map();
+async function cached(key, ms, fn) {
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < ms) return { ...hit.value, cachedAt: hit.at };
+  const value = await fn();
+  cache.set(key, { at: Date.now(), value });
+  if (cache.size > 200) cache.delete(cache.keys().next().value);
+  return { ...value, cachedAt: Date.now() };
+}
+
+// ==================== خريطة ساعات البيع ====================
+router.get('/hourly', wrap(async (req) => {
+  const t = need(req);
+  if (!t.isReady) throw new HttpError(400, 'الإعداد غير مكتمل');
+  const days = [7, 14, 28].includes(parseInt(req.query.days)) ? parseInt(req.query.days) : 14;
+  const product = String(req.query.product || '') || null;
+  const refresh = req.query.refresh === '1';
+  const key = `hourly:${t.id}:${days}:${product || ''}`;
+  if (refresh) cache.delete(key);
+  return cached(key, 30 * 60000, async () => {
+    const from = t.daysAgo(days), to = t.daysAgo(1); // أيام كاملة بس
+    const dates = []; for (let i = days; i >= 1; i--) dates.push(t.daysAgo(i));
+    const camp = { meta: new Set(), tiktok: new Set() };
+    if (product) for (const r of t.db.rows()) {
+      if (r.product_name === product && r.campaign_id) camp[(r.platform || (String(r.adset_id).startsWith('tt_') ? 'tiktok' : 'meta'))].add(String(r.campaign_id));
+    }
+    const grid = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ spend: 0, purchases: 0 })));
+    const errors = [];
+    const add = (rows) => { for (const r of rows) { const g = grid[new Date(`${r.date}T00:00:00Z`).getUTCDay()][r.hour]; if (g) { g.spend += r.spend; g.purchases += r.purchases; } } };
+    if (t.setupStatus.meta && (!product || camp.meta.size)) {
+      for (const acc of t.metaAccounts) {
+        try { add(await require('../meta/data').getHourlyRange(t, acc, from, to, product ? [...camp.meta] : null)); }
+        catch (err) { errors.push(`Meta ${acc}: ${err.message}`); }
+      }
+    }
+    if (t.setupStatus.tiktok && (!product || camp.tiktok.size)) {
+      for (const adv of t.tiktokAdvertisers) {
+        try { add(await require('../tiktok/data').getHourlyRange(t, adv, dates, product ? [...camp.tiktok] : null)); }
+        catch (err) { errors.push(`TikTok ${adv}: ${err.message}`); }
+      }
+    }
+    for (const row of grid) for (const c of row) c.spend = r2(c.spend);
+    return { days, from, to, product, grid, errors, products: t.products.map(p => p.name) };
+  });
+}));
+
+// ==================== مستوى الإعلان (الكريتيف) ====================
+router.get('/adsets/:id/ads', wrap(async (req) => {
+  const t = need(req);
+  const ctx = adsetCtx(req);
+  const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 30);
+  const from = t.daysAgo(days - 1), to = t.today();
+  const key = `ads:${t.id}:${ctx.adsetId}:${days}`;
+  if (req.query.refresh === '1') cache.delete(key);
+  return cached(key, 10 * 60000, async () => {
+    const ads = ctx.platform === 'tiktok'
+      ? await require('../tiktok/data').getAdsOfAdgroup(t, ctx.accountId, String(ctx.adsetId).replace(/^tt_/, ''), from, to)
+      : await require('../meta/data').getAdsOfAdset(t, ctx.adsetId, from, to);
+    const maxCpp = t.products.find(p => p.name === ctx.productName)?.maxCpp ?? null;
+    return {
+      adset: ctx.adsetName, product: ctx.productName, platform: ctx.platform, days, from, to, maxCpp,
+      ads: ads.map(a => ({ ...a, spend: r2(a.spend), ctr: r2(a.ctr), frequency: r2(a.frequency), cpp: r2(a.cpp),
+        hookRate: r2(a.hookRate), holdRate: r2(a.holdRate),
+        ageDays: a.createdAt ? Math.floor((Date.now() - new Date(a.createdAt)) / 86400000) : null }))
+        .sort((x, y) => y.spend - x.spend)
+    };
+  });
+}));
+
+// ==================== إجراءات جماعية ====================
+router.post('/adsets/bulk', wrap(async (req) => {
+  const t = need(req);
+  const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).map(String))].slice(0, 50);
+  const op = req.body?.op;
+  const pct = parseInt(req.body?.pct);
+  if (!ids.length) throw new HttpError(400, 'اختار Ad Set واحد على الأقل');
+  if (!['pause', 'budget'].includes(op)) throw new HttpError(400, 'إجراء غير معروف');
+  if (op === 'budget' && (!pct || pct < -90 || pct > 200)) throw new HttpError(400, 'النسبة لازم تكون بين -90% و +200%');
+  const ok = [], failed = [];
+  for (const id of ids) {
+    const ctx = actions.contextFromAdset(t, id);
+    if (!ctx) { failed.push({ id, error: 'مش موجود' }); continue; }
+    try {
+      if (op === 'pause') { await actions.pause(t, ctx, req.actor, { silent: true, log: { bulk: true } }); ok.push({ id, name: ctx.adsetName }); }
+      else {
+        const r = await actions.changeBudget(t, ctx, pct, req.actor, { silent: true, log: { bulk: true } });
+        if (r.success) ok.push({ id, name: r.adsetName, from: r.oldBudget, to: r.newBudget });
+        else failed.push({ id, name: ctx.adsetName, error: r.error });
+      }
+    } catch (err) { failed.push({ id, name: ctx.adsetName, error: err.message }); }
+  }
+  if (ok.length) {
+    const what = op === 'pause' ? '⏸ إيقاف جماعي' : `${pct > 0 ? '🚀 رفع' : '💰 تقليل'} ميزانية جماعي ${pct > 0 ? '+' : ''}${pct}%`;
+    const lines = ok.map(o => `• ${o.name}${o.to != null ? ` — من ${Math.round(o.from)} لـ ${Math.round(o.to)}` : ''}`).join('\n');
+    await actions.notifyTeam(t, req.actor, `${what} (${ok.length})\n${lines}${failed.length ? `\n⚠️ فشل ${failed.length}` : ''}\n👤 بواسطة: ${actions.actorLabel(req.actor)}`);
+  }
+  return { ok, failed };
+}));
+
+// ==================== القواعد التلقائية ====================
+const R = () => require('../core/rules');
+router.get('/rules', wrap((req) => {
+  const t = need(req);
+  const rules = R();
+  const fires = {};
+  for (const a of t.db.load().alert_log || []) {
+    if (!String(a.alert_type).startsWith('rule:')) continue;
+    const id = a.alert_type.slice(5);
+    const f = fires[id] ||= { count: 0, last: 0 };
+    f.count++; f.last = Math.max(f.last, a.sent_at);
+  }
+  return {
+    rules: t.rules.map(r => ({ ...r, conditionText: rules.describeCondition(r), actionText: rules.describeAction(r), fires: fires[r.id] || { count: 0, last: 0 } })),
+    conditions: rules.CONDITIONS, actions: rules.ACTIONS, maxAutoUp: rules.MAX_AUTO_UP,
+    products: t.products.map(p => p.name)
+  };
+}));
+router.post('/rules', wrap((req) => {
+  const t = need(req);
+  if (t.rules.length >= 30) throw new HttpError(400, 'أقصى عدد 30 قاعدة');
+  const rule = R().validateRule(t, req.body || {});
+  t.saveRules([...t.rules, rule]);
+  t.logAction(req.actor, 'rule_add', { rule: rule.name, mode: rule.mode });
+  return { rule };
+}));
+router.put('/rules/:id', wrap((req) => {
+  const t = need(req);
+  const old = t.rules.find(r => r.id === req.params.id);
+  if (!old) throw new HttpError(404, 'القاعدة مش موجودة');
+  const rule = R().validateRule(t, req.body || {}, old);
+  t.saveRules(t.rules.map(r => (r.id === old.id ? rule : r)));
+  t.logAction(req.actor, 'rule_edit', { rule: rule.name, enabled: rule.enabled, mode: rule.mode });
+  return { rule };
+}));
+router.delete('/rules/:id', wrap((req) => {
+  const t = need(req);
+  const old = t.rules.find(r => r.id === req.params.id);
+  if (!old) throw new HttpError(404, 'القاعدة مش موجودة');
+  t.saveRules(t.rules.filter(r => r.id !== old.id));
+  t.logAction(req.actor, 'rule_remove', { rule: old.name });
+  return { ok: true };
 }));
 
 // ==================== السجل ====================

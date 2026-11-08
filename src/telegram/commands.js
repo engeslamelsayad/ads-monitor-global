@@ -13,6 +13,8 @@ const HELP = (t) => `🤖 ${t.name} — مراقبة إعلانات Meta & TikTo
 /top — أفضل 3 منتجات اليوم
 /worst — أسوأ 3 منتجات اليوم
 /budget — الإنفاق + توقع نهاية اليوم
+/decisions — نتيجة آخر قراراتك (قبل/بعد 3 أيام)
+/rules — القواعد التلقائية
 
 🔍 المنتجات
 /product اسم — أداء per adset آخر 3 أيام
@@ -91,6 +93,26 @@ function register(tenant) {
   on(/^\/budget/, (msg) => alerts.sendBudget(tenant, msg.chat.id));
   on(/^\/top/, (msg) => alerts.sendRanking(tenant, msg.chat.id, true));
   on(/^\/worst/, (msg) => alerts.sendRanking(tenant, msg.chat.id, false));
+  on(/^\/decisions/, (msg) => {
+    const oc = require('../core/outcomes');
+    const list = oc.computeOutcomes(tenant).slice(0, 10);
+    if (!list.length) return reply(msg, 'مفيش قرارات متسجلة لسه (رفع/تقليل ميزانية أو إيقاف).');
+    const pending = list.filter(o => o.status === 'pending');
+    const judged = list.filter(o => o.status !== 'pending');
+    let t = '📊 نتيجة آخر قراراتك\n(متوسط 3 أيام قبل القرار مقابل 3 أيام بعده)\n\n';
+    t += judged.map(o => oc.describe(o, tenant.currency)).join('\n');
+    if (pending.length) t += `\n⏳ مستني النتيجة:\n${pending.map(o => `• ${o.action === 'pause' ? 'إيقاف' : o.action === 'budget_up' ? 'رفع' : 'تقليل'} ${o.adset} — جاهزة ${o.readyOn}`).join('\n')}`;
+    t += '\n\nالتفاصيل في الداشبورد: /dashboard';
+    return sendLong(tenant, msg.chat.id, t, { plain: true });
+  });
+
+  on(/^\/rules/, (msg) => {
+    const R = require('../core/rules');
+    const list = tenant.rules;
+    if (!list.length) return reply(msg, '📐 مفيش قواعد تلقائية لسه.\nاعملها من الداشبورد (تبويب القواعد): /dashboard\n\nمثال: لو CPP فوق 130% لمدة يومين، قلل الميزانية 30% وبلغني.');
+    return reply(msg, `📐 القواعد التلقائية\n\n${list.map(r => `${r.enabled ? '🟢' : '⚪'} ${r.name}\n   ${r.product ? r.product : 'كل المنتجات'}: لو ${R.describeCondition(r)}\n   ${R.describeAction(r)} — ${r.action === 'notify' ? 'إشعار' : r.mode === 'auto' ? 'تلقائي' : 'بتأكيد منك'}`).join('\n\n')}\n\nالتعديل من الداشبورد: /dashboard`);
+  });
+
   on(/^\/product (.+)/, (msg, m) => alerts.sendProductReport(tenant, msg.chat.id, m[1].trim(), 3));
   on(/^\/week (.+)/, (msg, m) => alerts.sendProductReport(tenant, msg.chat.id, m[1].trim(), 7));
 

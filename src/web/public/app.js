@@ -11,7 +11,16 @@ const state = {
   overview: null,
   products: null,
   discovery: null,
-  logsView: 'actions'
+  logsView: 'actions',
+  selected: new Set(),
+  analysisView: 'trend',
+  trendProduct: null,
+  trendDays: 30,
+  compareDays: 7,
+  hourlyDays: 14,
+  hourlyProduct: '',
+  hourlyMetric: 'purchases',
+  editingRule: null
 };
 
 // ==================== أدوات ====================
@@ -31,6 +40,10 @@ function relTime(ms) {
   if (h < 24) return `من ${h} ساعة`;
   return `من ${Math.round(h / 24)} يوم`;
 }
+function fmtTime(ms) {
+  return new Intl.DateTimeFormat('ar-EG-u-nu-latn', { timeZone: tz(), hour: '2-digit', minute: '2-digit' }).format(new Date(ms));
+}
+const shortDate = (d) => (d ? `${parseInt(d.slice(8, 10))}/${parseInt(d.slice(5, 7))}` : '');
 function fmtWhen(ms) {
   return new Intl.DateTimeFormat('ar-EG-u-nu-latn', { timeZone: tz(), day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(ms));
 }
@@ -97,6 +110,9 @@ const plat = (p) => `<span class="plat ${p === 'tiktok' ? 'tiktok' : 'meta'}">${
 // ==================== الهيكل ====================
 const TABS = [
   ['overview', 'الأداء'],
+  ['analysis', 'التحليل'],
+  ['decisions', 'القرارات'],
+  ['rules', 'القواعد'],
   ['products', 'المنتجات'],
   ['discovery', 'الاكتشاف'],
   ['accounts', 'الحسابات'],
@@ -142,7 +158,7 @@ function renderShell() {
 async function renderTab() {
   const main = document.getElementById('main');
   if (!main) return;
-  const fn = { overview: viewOverview, products: viewProducts, discovery: viewDiscovery, accounts: viewAccounts, settings: viewSettings, team: viewTeam, logs: viewLogs }[state.tab] || viewOverview;
+  const fn = { overview: viewOverview, analysis: viewAnalysis, decisions: viewDecisions, rules: viewRules, products: viewProducts, discovery: viewDiscovery, accounts: viewAccounts, settings: viewSettings, team: viewTeam, logs: viewLogs }[state.tab] || viewOverview;
   try { await fn(main); } catch (e) { main.innerHTML = `<div class="empty"><p>${esc(e.message)}</p></div>`; }
 }
 
@@ -189,7 +205,7 @@ async function viewOverview(main) {
         <div class="seg" role="group" aria-label="الفترة">${periods.map(([d, l]) =>
           `<button aria-pressed="${state.days === d}" data-days="${d}">${l}</button>`).join('')}</div>
         <span class="spacer"></span>
-        <span class="muted small">آخر فحص ${relTime(o.lastCycle)}</span>
+        <span class="muted small">آخر فحص ${relTime(o.lastCycle)} — الجاي <span class="num">${esc(fmtTime(o.nextCycle))}</span> (كل <span class="num">${o.intervalMinutes}</span> دقيقة)</span>
         <button class="btn sm" data-action="check">${o.cycleRunning ? '<span class="spin"></span> فحص شغال' : 'فحص الآن'}</button>
       </div>
       <div class="totals">
@@ -202,6 +218,7 @@ async function viewOverview(main) {
       </div>
     </section>
 
+    ${diagNotice(o)}
     ${o.unmatched.length ? `<section><div class="notice"><b>${o.unmatched.length} حملة بتصرف من غير مراقبة</b>
       <span class="muted num">${n0(o.unmatched.reduce((a, c) => a + c.spend, 0))} ${cur()} النهارده</span>
       <button class="btn sm" data-tab="discovery">اكتشف منتجاتها</button></div></section>` : ''}
@@ -226,21 +243,102 @@ async function viewOverview(main) {
     <section>
       <div class="sec-head"><h2>Ad Sets${state.productFilter ? ` — ${bdi(state.productFilter)}` : ''}</h2>
         ${state.productFilter ? '<button class="btn ghost sm" data-action="clear-filter">عرض الكل</button>' : ''}
-        <span class="spacer"></span><span class="muted small num">${adsets.length}</span></div>
+        <span class="spacer"></span>${adsets.some(a => a.activeToday) ? `<button class="btn ghost sm" data-action="sel-all">${adsets.filter(a => a.activeToday).every(a => state.selected.has(a.id)) ? 'إلغاء التحديد' : 'تحديد الشغال'}</button>` : ''}<span class="muted small num">${adsets.length}</span></div>
       <div class="panel table-wrap">${adsets.length ? `<table class="stack">
         <thead><tr><th>Ad Set</th><th>CPP</th><th>الإنفاق</th><th>المبيعات</th><th>الميزانية</th><th>العمر</th><th></th></tr></thead>
         <tbody>${adsets.map(a => `<tr>
-          <td class="name"><span class="main">${plat(a.platform)} ${bdi(a.name)}</span><span class="sub">${bdi(a.product)} — ${bdi(a.campaign)}</span></td>
+          <td class="name"><span class="main">${a.activeToday ? `<input type="checkbox" class="sel" data-sel="${esc(a.id)}" ${state.selected.has(a.id) ? 'checked' : ''} aria-label="اختيار">` : ''}${plat(a.platform)} ${bdi(a.name)}</span><span class="sub">${bdi(a.product)} — ${bdi(a.campaign)}${a.lastAction ? ` <span class="badge ${a.lastAction.action === 'budget_up' ? 'good' : a.lastAction.action === 'pause' ? 'bad' : 'warn'}">${LAST_ACT[a.lastAction.action](a.lastAction)} <span class="num">${shortDate(a.lastAction.day)}</span></span>` : ''}</span></td>
           <td>${gauge(a.cpp, a.maxCpp, true)}</td>
           <td class="num" data-label="الإنفاق">${n0(a.spend)}</td>
           <td class="num" data-label="المبيعات">${n0(a.purchases)}</td>
           <td class="num" data-label="الميزانية">${a.budget ? n0(a.budget) : '<span class="muted small">CBO</span>'}</td>
           <td data-label="العمر">${a.ageDays == null ? '<span class="muted">—</span>' : `<span class="badge num ${a.ageDays >= 21 ? 'warn' : ''}">${a.ageDays} يوم</span>`}</td>
-          <td class="actions">${a.activeToday ? `
+          <td class="actions"><button class="btn sm ghost" data-action="ads" data-id="${esc(a.id)}">الإعلانات</button>${a.activeToday ? `
             <button class="btn sm" data-action="budget" data-id="${esc(a.id)}">الميزانية</button>
             <button class="btn sm danger" data-action="pause" data-id="${esc(a.id)}">إيقاف</button>` : '<span class="muted small">مش شغال النهارده</span>'}</td>
         </tr>`).join('')}</tbody></table>` : `<div class="empty"><p>مفيش Ad Sets في الفترة دي.</p></div>`}</div>
-    </section>`;
+    </section>
+    <div class="bulkbar" data-bulkbar hidden></div>`;
+  renderBulkBar();
+}
+
+const LAST_ACT = {
+  pause: () => 'اتوقف',
+  budget_up: (x) => `رفع <bdi class="num">${x.pct ?? ''}%</bdi>`,
+  budget_down: (x) => `تقليل <bdi class="num">${Math.abs(x.pct ?? 0)}%</bdi>`
+};
+
+function diagNotice(o) {
+  const list = (o.diag || []).filter(a => a.error || a.matched === 0);
+  if (!list.length || o.adsets.some(a => a.activeToday)) return '';
+  const name = (a) => `${a.platform === 'tiktok' ? 'TikTok' : 'Meta'} <span class="num">${esc(a.id)}</span>`;
+  return `<section><div class="notice info"><b>ليه مفيش أرقام النهارده؟</b><ul class="small" style="margin:4px 0 0;padding-inline-start:18px">${list.map(a => `<li>${name(a)}: ${
+    a.error ? `خطأ — ${esc(a.error)}`
+    : a.spending === 0 ? `مفيش Ad Sets صرفت النهارده (<span class="num">${a.active}</span> نشط)`
+    : a.unmatched ? `<span class="num">${a.spending}</span> بيصرفوا بس مش متطابقين مع منتج`
+    : `<span class="num">${a.spending}</span> صرفوا بس حالتهم مش Active`}</li>`).join('')}</ul></div></section>`;
+}
+
+// ---------- الإجراءات الجماعية ----------
+function renderBulkBar() {
+  const bar = document.querySelector('[data-bulkbar]');
+  if (!bar) return;
+  const live = new Set((state.overview?.adsets || []).filter(a => a.activeToday).map(a => a.id));
+  for (const id of [...state.selected]) if (!live.has(id)) state.selected.delete(id);
+  const n = state.selected.size;
+  bar.hidden = !n;
+  if (!n) return;
+  bar.innerHTML = `<b class="num">${n}</b><span>مختار</span>
+    <button class="btn sm" data-action="bulk" data-op="budget" data-bp="-20"><bdi class="num">−20%</bdi></button>
+    <button class="btn sm" data-action="bulk" data-op="budget" data-bp="-30"><bdi class="num">−30%</bdi></button>
+    <button class="btn sm" data-action="bulk" data-op="budget" data-bp="20"><bdi class="num">+20%</bdi></button>
+    <input class="input num sm" type="number" min="-90" max="200" placeholder="نسبة" data-bulk-pct aria-label="نسبة مخصصة">
+    <button class="btn sm" data-action="bulk" data-op="budget" data-custom>تطبيق</button>
+    <button class="btn sm danger" data-action="bulk" data-op="pause">إيقاف</button>
+    <button class="btn sm ghost" data-action="sel-clear">إلغاء</button>`;
+}
+
+function bulkDialog(op, pct) {
+  const items = state.overview.adsets.filter(a => state.selected.has(a.id));
+  const what = op === 'pause' ? `إيقاف ${items.length} Ad Set` : `${pct > 0 ? 'رفع' : 'تقليل'} ميزانية ${items.length} Ad Set بنسبة <span class="num">${Math.abs(pct)}%</span>`;
+  openDialog(`<div class="dlg-head"><h3>${what}</h3></div>
+    <div class="dlg-body"><ul class="small" style="margin:0;padding-inline-start:18px;max-height:260px;overflow:auto">${items.map(a => `<li>${plat(a.platform)} ${bdi(a.name)}${op !== 'pause' && a.budget ? ` — من <span class="num">${n0(a.budget)}</span> إلى <span class="num">${n0(a.budget * (1 + pct / 100))}</span>` : ''}</li>`).join('')}</ul>
+      <p class="muted small">${op === 'pause' ? 'هيتضاف "claude edit" لأسمائهم.' : 'الـ Ad Sets اللي ميزانيتها على مستوى الحملة (CBO) أو هتنزل تحت الحد الأدنى هتتخطى.'} فريقك هيوصله ملخص واحد على Telegram.</p></div>
+    <div class="dlg-foot"><button class="btn ${op === 'pause' ? 'danger' : 'primary'}" data-action="confirm-bulk" data-op="${op}" data-bp="${pct || ''}">تنفيذ</button>
+      <button class="btn ghost" data-action="close">إلغاء</button></div>`);
+}
+
+// ---------- الإعلانات جوه Ad Set ----------
+async function adsDialog(id, days = 7, refresh = false) {
+  const a = findAdset(id);
+  $dlg.classList.add('wide');
+  openDialog(`<div class="dlg-head"><h3>إعلانات ${bdi(a?.name || id)}</h3></div><div class="dlg-body"><p class="muted"><span class="spin"></span> جاري جلب الإعلانات من ${a?.platform === 'tiktok' ? 'TikTok' : 'Meta'}…</p></div>
+    <div class="dlg-foot"><button class="btn ghost" data-action="close">إغلاق</button></div>`);
+  let r;
+  try { r = await api(`/adsets/${encodeURIComponent(id)}/ads?days=${days}${refresh ? '&refresh=1' : ''}`); } catch (e) {
+    $dlg.querySelector('.dlg-body').innerHTML = `<p>${esc(e.message)}</p>`; return;
+  }
+  const withSpend = r.ads.filter(x => x.spend > 0);
+  const bestHook = Math.max(...withSpend.map(x => x.hookRate), 0);
+  const tt = r.platform === 'tiktok';
+  $dlg.querySelector('.dlg-body').innerHTML = `
+    <div class="sec-head" style="margin-top:0"><div class="seg">${[3, 7, 14, 30].map(d => `<button aria-pressed="${d === r.days}" data-action="ads-days" data-id="${esc(id)}" data-d="${d}">${d} يوم</button>`).join('')}</div>
+      <span class="spacer"></span><span class="muted small">${bdi(r.product)} — Max <span class="num">${n2(r.maxCpp)}</span></span></div>
+    ${r.ads.length ? `<div class="table-wrap"><table class="ads">
+      <thead><tr><th>الإعلان</th><th>CPP</th><th>الإنفاق</th><th>المبيعات</th><th title="${tt ? 'مشاهدات ثانيتين ÷ الظهور' : 'مشاهدات 3 ثواني ÷ الظهور'}">Hook</th><th title="${tt ? 'نسبة إكمال الفيديو' : 'ThruPlay ÷ مشاهدات 3 ثواني'}">Hold</th><th>CTR</th><th>Freq</th><th>العمر</th></tr></thead>
+      <tbody>${r.ads.map(x => `<tr class="${x.spend ? '' : 'dim'}">
+        <td class="name"><span class="main">${x.thumb ? `<img class="thumb" src="${esc(x.thumb)}" alt="" loading="lazy">` : ''}${bdi(x.name)}</span><span class="sub">${x.status === 'ACTIVE' ? '<span class="badge good">شغال</span>' : `<span class="badge">${esc(x.status || 'متوقف')}</span>`}</span></td>
+        <td>${x.spend ? gauge(x.cpp, r.maxCpp, true) : '<span class="muted">—</span>'}</td>
+        <td class="num">${n0(x.spend)}</td>
+        <td class="num">${n0(x.purchases)}</td>
+        <td class="num">${x.impressions ? `<span class="${x.hookRate && x.hookRate === bestHook && withSpend.length > 1 ? 'best' : ''}">${n2(x.hookRate)}%</span>` : '—'}</td>
+        <td class="num">${x.impressions ? `${n2(x.holdRate)}%` : '—'}</td>
+        <td class="num">${x.impressions ? `${n2(x.ctr)}%` : '—'}</td>
+        <td class="num ${x.frequency >= 3 ? 'warn-t' : ''}">${x.frequency ? n2(x.frequency) : '—'}</td>
+        <td>${x.ageDays == null ? '—' : `<span class="badge num ${x.ageDays >= 21 ? 'warn' : ''}">${x.ageDays} يوم</span>`}</td>
+      </tr>`).join('')}</tbody></table></div>
+      <p class="muted small">الكريتيف بيتحرق لما الـ Hook والـ CTR ينزلوا والـ Frequency يطلع فوق 3 — قارن الإعلانات ببعض في نفس الفترة. آخر تحديث ${relTime(r.cachedAt)} — <button class="btn ghost sm" data-action="ads-days" data-id="${esc(id)}" data-d="${r.days}" data-refresh="1">تحديث</button></p>`
+    : '<p>مفيش إعلانات في الـ Ad Set ده.</p>'}`;
 }
 
 // ---------- حوار الإيقاف ----------
@@ -299,6 +397,231 @@ function setBudgetPct(pct) {
   prev.innerHTML = `${pct > 0 ? 'رفع' : 'تقليل'} <span class="num">${Math.abs(pct)}%</span>: من <span class="num">${n2(base)}</span> إلى <b class="num">${n2(next)}</b> ${cur()} يومياً${low ? '<br><span style="color:var(--z-over)">أقل من الحد الأدنى للميزانية</span>' : ''}`;
   btn.disabled = low;
   btn.dataset.pct = pct;
+}
+
+// ==================== التحليل ====================
+async function viewAnalysis(main) {
+  const v = state.analysisView;
+  main.innerHTML = `<section><div class="sec-head"><div class="seg" role="group" aria-label="نوع التحليل">
+      <button aria-pressed="${v === 'trend'}" data-av="trend">اتجاه المنتج</button>
+      <button aria-pressed="${v === 'compare'}" data-av="compare">مقارنة فترتين</button>
+      <button aria-pressed="${v === 'hourly'}" data-av="hourly">ساعات البيع</button></div></div>
+    <div id="av"><div class="boot">جاري التحميل…</div></div></section>`;
+  const box = document.getElementById('av');
+  if (v === 'trend') return viewTrend(box);
+  if (v === 'compare') return viewCompare(box);
+  return viewHourly(box);
+}
+
+// ---------- اتجاه المنتج ----------
+const ACT_MARK = { pause: 'إيقاف', budget_up: 'رفع', budget_down: 'تقليل', product_cpp: 'تعديل الحد', product_edit: 'تعديل الحد' };
+
+async function viewTrend(box) {
+  const q = new URLSearchParams({ days: state.trendDays });
+  if (state.trendProduct) q.set('product', state.trendProduct);
+  const r = await api(`/trend?${q}`);
+  state.trendProduct = r.product;
+  if (!r.product) { box.innerHTML = '<div class="empty"><p>مفيش منتجات لسه.</p></div>'; return; }
+  const sum = r.days.reduce((a, d) => ({ spend: a.spend + d.spend, purchases: a.purchases + d.purchases }), { spend: 0, purchases: 0 });
+  box.innerHTML = `
+    <div class="sec-head">
+      <select class="input" data-trend-product aria-label="المنتج">${r.products.map(p => `<option ${p === r.product ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
+      <div class="seg">${[14, 30, 60, 90].map(d => `<button aria-pressed="${state.trendDays === d}" data-trend-days="${d}">${d} يوم</button>`).join('')}</div>
+      <span class="spacer"></span>
+      <span class="muted small">صرف <b class="num">${n0(sum.spend)}</b> — مبيعات <b class="num">${n0(sum.purchases)}</b> — CPP <b class="num">${sum.purchases ? n2(sum.spend / sum.purchases) : '—'}</b></span>
+    </div>
+    <div class="panel pad">${trendChart(r)}
+      <div class="legend" style="margin-top:8px"><span><i style="background:var(--track)"></i>الإنفاق اليومي</span><span><i style="background:var(--accent)"></i>CPP</span><span><i style="background:var(--z-over);height:2px"></i>Max CPP</span><span><i style="background:var(--ink);border-radius:50%"></i>قرار اتاخد</span></div>
+    </div>
+    ${r.actions.length ? `<div class="panel" style="margin-top:10px"><ul class="log">${r.actions.slice().reverse().map(a => `<li><span class="when">${esc(fmtWhen(a.at))}</span><span>${(ACTION_TEXT[a.action] || (() => esc(a.action)))(a)}</span><span class="who">${a.via === 'rule' ? 'قاعدة' : a.via === 'dashboard' ? 'الداشبورد' : 'Telegram'}</span></li>`).join('')}</ul></div>` : ''}`;
+}
+
+function trendChart(r) {
+  const W = 760, H = 280, P = { l: 44, r: 44, t: 18, b: 30 };
+  const days = r.days;
+  const n = days.length;
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const bw = iw / n;
+  const maxSpend = Math.max(...days.map(d => d.spend), 1);
+  const cppVals = days.map(d => d.cpp).filter(v => v != null);
+  const maxC = Math.max(...cppVals, (r.maxCpp || 0) * 1.25, 1);
+  const x = (i) => P.l + i * bw + bw / 2;
+  const ys = (v) => P.t + ih - (v / maxSpend) * ih;
+  const yc = (v) => P.t + ih - (v / maxC) * ih;
+  const bars = days.map((d, i) => `<rect x="${P.l + i * bw + bw * 0.15}" y="${ys(d.spend)}" width="${bw * 0.7}" height="${Math.max(0, P.t + ih - ys(d.spend))}" class="c-bar"><title>${d.date}: صرف ${n0(d.spend)} — ${n0(d.purchases)} بيعة — CPP ${n2(d.cpp)}</title></rect>`).join('');
+  // خط الـ CPP مقطوع في الأيام اللي مفيهاش مبيعات
+  let path = '', open = false;
+  days.forEach((d, i) => { if (d.cpp == null) { open = false; return; } path += `${open ? 'L' : 'M'}${x(i).toFixed(1)},${yc(d.cpp).toFixed(1)}`; open = true; });
+  const dots = days.map((d, i) => d.cpp == null ? '' : `<circle cx="${x(i)}" cy="${yc(d.cpp)}" r="2.6" class="c-dot ${r.maxCpp && d.cpp > r.maxCpp ? 'over' : ''}"><title>${d.date}: CPP ${n2(d.cpp)}</title></circle>`).join('');
+  const maxLine = r.maxCpp ? `<line x1="${P.l}" x2="${W - P.r}" y1="${yc(r.maxCpp)}" y2="${yc(r.maxCpp)}" class="c-max"/><text x="${W - P.r + 4}" y="${yc(r.maxCpp) + 4}" class="c-lbl max">Max ${n0(r.maxCpp)}</text>` : '';
+  const idx = Object.fromEntries(days.map((d, i) => [d.date, i]));
+  const byDay = {};
+  for (const a of r.actions) if (idx[a.date] != null) (byDay[a.date] ||= []).push(a);
+  const marks = Object.entries(byDay).map(([date, list]) => {
+    const cx = x(idx[date]);
+    return `<g class="c-mark"><line x1="${cx}" x2="${cx}" y1="${P.t}" y2="${P.t + ih}"/><circle cx="${cx}" cy="${P.t - 6}" r="5"/><title>${date}: ${list.map(a => `${ACT_MARK[a.action] || a.action} ${a.adset || ''}${a.pct ? ` ${a.pct}%` : ''}`).join(' | ')}</title></g>`;
+  }).join('');
+  const step = Math.ceil(n / 8);
+  const xl = days.map((d, i) => (i % step === 0 || (i === n - 1 && (n - 1) % step >= step / 2)) ? `<text x="${x(i)}" y="${H - 10}" class="c-lbl" text-anchor="middle">${shortDate(d.date)}</text>` : '').join('');
+  const ticks = [0, 0.5, 1].map(f => `<text x="${P.l - 6}" y="${yc(maxC * f) + 4}" class="c-lbl" text-anchor="end">${n0(maxC * f)}</text><line x1="${P.l}" x2="${W - P.r}" y1="${yc(maxC * f)}" y2="${yc(maxC * f)}" class="c-grid"/>`).join('');
+  return `<div class="chart" dir="ltr"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="CPP والإنفاق يومياً">${ticks}${bars}${maxLine}<path d="${path}" class="c-line"/>${dots}${marks}${xl}
+    <text x="${P.l - 6}" y="${P.t - 6}" class="c-lbl" text-anchor="end">CPP</text></svg></div>`;
+}
+
+// ---------- مقارنة فترتين ----------
+function changeCell(v, goodWhenUp) {
+  if (v == null) return '<span class="muted">—</span>';
+  const good = v === 0 ? null : (v > 0) === goodWhenUp;
+  return `<span class="chg ${good == null ? '' : good ? 'up' : 'down'}"><bdi class="num">${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v)}%</bdi></span>`;
+}
+async function viewCompare(box) {
+  const r = await api(`/compare?days=${state.compareDays}`);
+  const row = (p, total = false) => `<tr class="${total ? 'total' : ''}">
+    <td class="name"><span class="main">${total ? esc(p.name) : bdi(p.name)}</span>${p.maxCpp ? `<span class="sub">Max <span class="num">${n2(p.maxCpp)}</span></span>` : ''}</td>
+    <td class="num">${n2(p.prev.cpp)}</td><td class="num"><b>${n2(p.cur.cpp)}</b></td><td>${changeCell(p.change.cpp, false)}</td>
+    <td class="num hide-sm">${n0(p.prev.purchases)}</td><td class="num">${n0(p.cur.purchases)}</td><td>${changeCell(p.change.purchases, true)}</td>
+    <td class="num hide-sm">${n0(p.prev.spend)}</td><td class="num hide-sm">${n0(p.cur.spend)}</td><td class="hide-sm">${changeCell(p.change.spend, true)}</td></tr>`;
+  box.innerHTML = `
+    <div class="sec-head"><div class="seg">${[[3, '3 أيام'], [7, 'أسبوع'], [14, 'أسبوعين'], [30, 'شهر']].map(([d, l]) => `<button aria-pressed="${state.compareDays === d}" data-cmp-days="${d}">${l}</button>`).join('')}</div>
+      <span class="spacer"></span><span class="muted small">من <span class="num">${shortDate(r.current.from)}</span> إلى <span class="num">${shortDate(r.current.to)}</span> مقابل <span class="num">${shortDate(r.previous.from)}</span> إلى <span class="num">${shortDate(r.previous.to)}</span> — أيام كاملة من غير النهارده</span></div>
+    <div class="panel table-wrap">${r.products.length ? `<table class="cmp">
+      <thead><tr><th rowspan="2">المنتج</th><th colspan="3">CPP</th><th colspan="3">المبيعات</th><th colspan="3" class="hide-sm">الإنفاق</th></tr>
+        <tr><th>قبل</th><th>دلوقتي</th><th>التغيير</th><th class="hide-sm">قبل</th><th>دلوقتي</th><th>التغيير</th><th class="hide-sm">قبل</th><th class="hide-sm">دلوقتي</th><th class="hide-sm">التغيير</th></tr></thead>
+      <tbody>${r.products.map(p => row(p)).join('')}${row(r.totals, true)}</tbody></table>` : '<div class="empty"><p>مفيش بيانات في الفترتين.</p></div>'}</div>
+    <p class="muted small">CPP لما ينزل = أخضر، المبيعات لما تزيد = أخضر.</p>`;
+}
+
+// ---------- ساعات البيع ----------
+const WEEK = [[6, 'السبت'], [0, 'الأحد'], [1, 'الاتنين'], [2, 'التلات'], [3, 'الأربع'], [4, 'الخميس'], [5, 'الجمعة']];
+async function viewHourly(box, refresh = false) {
+  box.innerHTML = '<div class="panel pad"><span class="spin"></span> جاري جلب البيانات بالساعة من المنصات… أول مرة بتاخد لحد دقيقة</div>';
+  const q = new URLSearchParams({ days: state.hourlyDays });
+  if (state.hourlyProduct) q.set('product', state.hourlyProduct);
+  if (refresh) q.set('refresh', '1');
+  let r;
+  try { r = await api(`/hourly?${q}`); } catch (e) { box.innerHTML = `<div class="notice">${esc(e.message)}</div>`; return; }
+  const metric = state.hourlyMetric;
+  const val = (c) => metric === 'purchases' ? c.purchases : metric === 'spend' ? c.spend : (c.purchases ? c.spend / c.purchases : null);
+  const cells = r.grid.flat();
+  const vals = cells.map(val).filter(v => v != null && v > 0);
+  const hi = Math.max(...vals, 1), lo = Math.min(...vals, hi);
+  const intensity = (v) => {
+    if (v == null || v <= 0) return 0;
+    if (metric === 'cpp') return hi === lo ? 0.5 : 0.15 + 0.85 * (1 - (v - lo) / (hi - lo)); // CPP أقل = أغمق
+    return 0.12 + 0.88 * (v / hi);
+  };
+  // أحسن ساعات (مجموع الأسبوع)
+  const hours = Array.from({ length: 24 }, (_, h) => r.grid.reduce((a, row) => ({ spend: a.spend + row[h].spend, purchases: a.purchases + row[h].purchases }), { spend: 0, purchases: 0 }));
+  const totalP = hours.reduce((a, h) => a + h.purchases, 0);
+  const blocks = Array.from({ length: 24 }, (_, h) => ({ h, p: hours[h].purchases + hours[(h + 1) % 24].purchases + hours[(h + 2) % 24].purchases })).sort((a, b) => b.p - a.p);
+  const best = blocks[0], worst = Array.from({ length: 24 }, (_, h) => ({ h, s: hours[h].spend, p: hours[h].purchases })).filter(x => x.s > 0).sort((a, b) => (a.p / a.s) - (b.p / b.s))[0];
+  const hh = (h) => `${String(h % 24).padStart(2, '0')}:00`;
+  box.innerHTML = `
+    <div class="sec-head">
+      <select class="input" data-hourly-product aria-label="المنتج"><option value="">كل الحسابات</option>${r.products.map(p => `<option ${p === state.hourlyProduct ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
+      <div class="seg">${[7, 14, 28].map(d => `<button aria-pressed="${state.hourlyDays === d}" data-hourly-days="${d}">${d} يوم</button>`).join('')}</div>
+      <div class="seg">${[['purchases', 'المبيعات'], ['cpp', 'CPP'], ['spend', 'الإنفاق']].map(([k, l]) => `<button aria-pressed="${metric === k}" data-hourly-metric="${k}">${l}</button>`).join('')}</div>
+      <span class="spacer"></span><button class="btn ghost sm" data-action="hourly-refresh">تحديث</button>
+    </div>
+    ${r.errors.length ? `<div class="notice small">${r.errors.map(esc).join('<br>')}</div>` : ''}
+    ${totalP ? `<div class="notice info"><span>أكتر 3 ساعات بيع: من <b class="num">${hh(best.h)}</b> لـ <b class="num">${hh(best.h + 3)}</b> (<span class="num">${Math.round(best.p / totalP * 100)}%</span> من المبيعات)${worst && worst.p / worst.s < totalP / hours.reduce((a, x) => a + x.spend, 0) * 0.5 ? ` — أضعف ساعة مقابل الصرف: <b class="num">${hh(worst.h)}</b>` : ''}</span></div>` : ''}
+    <div class="panel pad heat-wrap"><div class="heat" dir="ltr">
+      <div></div>${Array.from({ length: 24 }, (_, h) => `<div class="hl">${h % 3 === 0 ? h : ''}</div>`).join('')}
+      ${WEEK.map(([d, name]) => `<div class="dl">${name}</div>${r.grid[d].map((c, h) => {
+        const v = val(c);
+        return `<div class="hc" style="--a:${intensity(v).toFixed(2)}" title="${name} ${hh(h)} — ${n0(c.purchases)} بيعة، صرف ${n0(c.spend)}${c.purchases ? `، CPP ${n2(c.spend / c.purchases)}` : ''}"></div>`;
+      }).join('')}`).join('')}
+    </div></div>
+    <p class="muted small">آخر <span class="num">${r.days}</span> يوم كاملين بتوقيت الحساب الإعلاني. ${metric === 'cpp' ? 'الأغمق = CPP أقل (أحسن).' : 'الأغمق = أكتر.'} آخر تحديث ${relTime(r.cachedAt)}.</p>`;
+}
+
+// ==================== القرارات ====================
+const VERDICT = { success: ['good', 'نجح'], mixed: ['warn', 'نص نص'], fail: ['bad', 'ما نجحش'], neutral: ['', 'محايد'] };
+async function viewDecisions(main) {
+  const r = await api('/outcomes');
+  const s = r.summary;
+  const card = (type, title) => {
+    const x = s[type];
+    if (!x.total) return '';
+    return `<div class="t"><b class="num">${x.judged ? `${x.success}/${x.judged}` : '—'}</b><span>${title} نجحت${x.total > x.judged ? ` (<span class="num">${x.total - x.judged}</span> مستنية)` : ''}</span></div>`;
+  };
+  const metricsRow = (b, a) => !a ? '' : `<div class="ba">
+      <span>CPP <bdi class="num">${n2(b.cpp)}</bdi> إلى <b class="num">${n2(a.cpp)}</b></span>
+      <span>مبيعات/يوم <bdi class="num">${n2(b.purchasesPerDay)}</bdi> إلى <b class="num">${n2(a.purchasesPerDay)}</b></span>
+      <span>صرف/يوم <bdi class="num">${n0(b.spendPerDay)}</bdi> إلى <b class="num">${n0(a.spendPerDay)}</b></span></div>`;
+  main.innerHTML = `
+    <section>
+      <div class="sec-head"><h2>نتيجة القرارات</h2><span class="spacer"></span><span class="muted small">متوسط <span class="num">${r.window}</span> أيام قبل القرار مقابل <span class="num">${r.window}</span> أيام بعده — يوم القرار نفسه مش محسوب</span></div>
+      ${r.list.length ? `<div class="totals">${card('budget_up', 'قرارات الرفع')}${card('budget_down', 'قرارات التقليل')}${card('pause', 'الإيقافات')}
+        ${s.savingPerDay ? `<div class="t"><b class="num">${n0(s.savingPerDay)}</b><span>توفير الإيقافات يومياً (${cur()})</span></div>` : ''}</div>` : ''}
+    </section>
+    <section><div class="panel">${r.list.length ? `<ul class="log outcomes">${r.list.map(o => {
+      const [cls, label] = o.verdict ? VERDICT[o.verdict] : ['', 'مستني'];
+      const what = o.action === 'pause' ? `إيقاف ${bdi(o.adset)}` : `${o.action === 'budget_up' ? 'رفع' : 'تقليل'} ميزانية ${bdi(o.adset)} <span class="num">${Math.abs(o.pct || 0)}%</span>${o.from != null ? ` — من <span class="num">${n0(o.from)}</span> إلى <span class="num">${n0(o.to)}</span>` : ''}`;
+      return `<li>
+        <span class="when">${esc(fmtWhen(o.at))}<br><span class="muted small">${o.via === 'rule' ? 'قاعدة' : o.via === 'dashboard' ? 'الداشبورد' : 'Telegram'}</span></span>
+        <span class="oc-body"><span>${plat(o.platform)} ${what} <span class="muted small">— ${bdi(o.product || '')}</span></span>
+          ${o.status === 'pending' ? `<span class="muted small">النتيجة هتبان يوم <span class="num">${shortDate(o.readyOn)}</span> (أول يومين كاملين بعد القرار)</span>`
+            : o.action === 'pause' && o.productStats?.before ? `${metricsRow(o.productStats.before, o.productStats.after)}<span class="muted small">على مستوى المنتج كله${o.savingPerDay ? ` — الـ Ad Set كان بيصرف <span class="num">${n0(o.savingPerDay)}</span> ${cur()} يومياً` : ''}</span>`
+            : metricsRow(o.before, o.after)}
+          ${o.reason ? `<span class="small">${esc(o.reason)}${o.status === 'partial' ? ` <span class="muted">(مبدئي — ${o.afterDays} من ${o.window} أيام)</span>` : ''}</span>` : ''}</span>
+        <span class="badge ${cls}">${label}</span></li>`;
+    }).join('')}</ul>` : '<div class="empty"><p>مفيش قرارات متسجلة لسه.</p><p class="muted">أي رفع أو تقليل ميزانية أو إيقاف من البوت أو الداشبورد هيظهر هنا ونتيجته بعد 3 أيام.</p></div>'}</div></section>`;
+}
+
+// ==================== القواعد التلقائية ====================
+const RULE_TEMPLATES = [
+  { name: 'CPP عالي يومين', condition: 'cpp_above', threshold: 130, days: 2, action: 'budget_down', pct: 30, mode: 'confirm' },
+  { name: 'صرف من غير مبيعات', condition: 'spend_no_sales', threshold: 200, days: 1, action: 'pause', mode: 'confirm' },
+  { name: 'فرصة Scale 3 أيام', condition: 'cpp_below', threshold: 70, days: 3, action: 'budget_up', pct: 20, mode: 'confirm' }
+];
+async function viewRules(main) {
+  const r = await api('/rules');
+  state.rulesMeta = r;
+  main.innerHTML = `
+    <section>
+      <div class="sec-head"><h2>القواعد التلقائية</h2><span class="muted small num">${r.rules.length}</span><span class="spacer"></span>
+        <button class="btn primary sm" data-action="rule-new">قاعدة جديدة</button></div>
+      <div id="rule-form"></div>
+      <div class="panel">${r.rules.length ? `<ul class="log rules">${r.rules.map(x => `<li class="${x.enabled ? '' : 'dim'}">
+        <span class="when"><label class="switch"><input type="checkbox" data-rule-toggle="${esc(x.id)}" ${x.enabled ? 'checked' : ''} aria-label="تشغيل"><span></span></label></span>
+        <span class="oc-body"><b>${bdi(x.name)}</b>
+          <span>لو ${esc(x.conditionText)} ${x.product ? `في ${bdi(x.product)}` : 'في أي منتج'}، ساعتها ${esc(x.actionText)}</span>
+          <span class="muted small">${x.action === 'notify' ? 'إشعار بس' : x.mode === 'auto' ? '<span class="badge warn">تلقائي</span> بينفذ ويبلغك' : 'بيسألك على Telegram قبل التنفيذ'} — مرة كل <span class="num">${x.cooldownHours}</span> ساعة بالكتير لنفس الـ Ad Set${x.fires.count ? ` — اشتغلت <span class="num">${x.fires.count}</span> مرة، آخرها ${relTime(x.fires.last)}` : ''}</span></span>
+        <span class="row-actions"><button class="btn sm ghost" data-action="rule-edit" data-id="${esc(x.id)}">تعديل</button><button class="btn sm ghost danger" data-action="rule-del" data-id="${esc(x.id)}">حذف</button></span>
+      </li>`).join('')}</ul>` : `<div class="empty"><p>مفيش قواعد لسه.</p><p class="muted">ابدأ بقالب:</p><div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">${RULE_TEMPLATES.map((t, i) => `<button class="btn sm" data-action="rule-tpl" data-i="${i}">${esc(t.name)}</button>`).join('')}</div></div>`}</div>
+      <p class="muted small">القواعد بتتراجع مع كل فحص دوري على الـ Ad Sets الشغالة النهارده. الأيام المتتالية بتشمل النهارده لحد وقت الفحص.</p>
+    </section>`;
+}
+
+function ruleForm(rule = {}) {
+  const m = state.rulesMeta;
+  const r = { condition: 'cpp_above', threshold: 130, days: 2, action: 'budget_down', pct: 30, mode: 'confirm', cooldownHours: 24, enabled: true, ...rule };
+  state.editingRule = r.id || null;
+  const box = document.getElementById('rule-form');
+  box.innerHTML = `<form class="panel pad rule-form" data-form="rule" style="margin-bottom:12px">
+    <div class="sentence">
+      <span>لو</span>
+      <select class="input" name="condition" data-rule-cond>${Object.entries(m.conditions).map(([k, c]) => `<option value="${k}" ${r.condition === k ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}</select>
+      <input class="input num" name="threshold" type="number" step="1" value="${esc(r.threshold)}" style="width:80px" aria-label="النسبة"><span>% من Max CPP</span>
+      <span data-days-wrap ${m.conditions[r.condition].daysAllowed ? '' : 'hidden'}>لمدة <input class="input num" name="days" type="number" min="1" max="7" value="${esc(r.days)}" style="width:60px" aria-label="أيام"> يوم ورا بعض</span>
+      <span>في</span>
+      <select class="input" name="product"><option value="">أي منتج</option>${m.products.map(p => `<option ${r.product === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
+    </div>
+    <div class="sentence">
+      <span>ساعتها</span>
+      <select class="input" name="action" data-rule-act>${Object.entries(m.actions).map(([k, l]) => `<option value="${k}" ${r.action === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+      <span data-pct-wrap ${['budget_down', 'budget_up'].includes(r.action) ? '' : 'hidden'}><input class="input num" name="pct" type="number" min="5" max="200" value="${esc(r.pct ?? 20)}" style="width:70px" aria-label="نسبة الميزانية">%</span>
+      <span data-mode-wrap ${r.action === 'notify' ? 'hidden' : ''}><select class="input" name="mode"><option value="confirm" ${r.mode !== 'auto' ? 'selected' : ''}>بتأكيد مني على Telegram</option><option value="auto" ${r.mode === 'auto' ? 'selected' : ''}>تلقائي وبلغني</option></select></span>
+    </div>
+    <div class="sentence muted small">
+      <span>الاسم</span><input class="input" name="name" value="${esc(r.name || '')}" maxlength="60" placeholder="اختياري">
+      <span>ومتتكررش على نفس الـ Ad Set قبل</span><input class="input num" name="cooldownHours" type="number" min="1" max="168" value="${esc(r.cooldownHours)}" style="width:70px" aria-label="ساعات"><span>ساعة</span>
+    </div>
+    <p class="muted small" style="margin:6px 0 0">الرفع التلقائي أقصاه <span class="num">${m.maxAutoUp}%</span> في المرة. الإيقاف التلقائي بيوقف من غير ما يسألك — استخدمه بحذر.</p>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary" type="submit">${r.id ? 'حفظ' : 'إضافة القاعدة'}</button><button class="btn ghost" type="button" data-action="rule-cancel">إلغاء</button></div>
+  </form>`;
+  box.querySelector('select[name="condition"]').focus();
 }
 
 // ==================== المنتجات ====================
@@ -498,7 +821,10 @@ const ACTION_TEXT = {
   alias_remove: (a) => `حذف اسم بديل من ${bdi(a.product)}: ${bdi(a.alias)}`,
   setting: (a) => `إعداد ${bdi(a.name)} = ${bdi(a.value)}`,
   accounts: (a) => `تحديث حسابات ${a.platform === 'tiktok' ? 'TikTok' : 'Meta'} (${a.count})`,
-  user_remove: (a) => `حذف مستخدم ${bdi(a.user)}`
+  user_remove: (a) => `حذف مستخدم ${bdi(a.user)}`,
+  rule_add: (a) => `إضافة قاعدة ${bdi(a.rule)}${a.mode === 'auto' ? ' (تلقائية)' : ''}`,
+  rule_edit: (a) => `تعديل قاعدة ${bdi(a.rule)}${a.enabled === false ? ' (اتوقفت)' : ''}`,
+  rule_remove: (a) => `حذف قاعدة ${bdi(a.rule)}`
 };
 const ALERT_TEXT = { hourly: 'تنبيه تجاوز', scale: 'فرصة Scale' };
 const REASON_TEXT = { high_cpp: 'CPP فوق الحد', high_spend_low_purchases: 'إنفاق بدون مبيعات', scale_opportunity: 'CPP تحت الحد بكتير' };
@@ -512,10 +838,10 @@ async function viewLogs(main) {
       <div class="panel">${isA
         ? (actions.length ? `<ul class="log">${actions.map(a => `<li><span class="when">${esc(fmtWhen(a.at))}</span>
             <span>${(ACTION_TEXT[a.action] || (() => esc(a.action)))(a)}</span>
-            <span class="who num">${a.via === 'dashboard' ? 'الداشبورد' : 'Telegram'} — ${esc(a.by)}</span></li>`).join('')}</ul>`
+            <span class="who num">${a.via === 'rule' ? `قاعدة — ${esc(a.by)}` : `${a.via === 'dashboard' ? 'الداشبورد' : 'Telegram'} — ${esc(a.by)}`}${a.bulk ? ' (جماعي)' : ''}</span></li>`).join('')}</ul>`
           : '<div class="empty"><p>مفيش إجراءات لسه.</p></div>')
         : (alerts.length ? `<ul class="log">${alerts.map(a => `<li><span class="when">${esc(fmtWhen(a.sent_at))}</span>
-            <span>${a.alert_type === 'scale' ? '<span class="badge good">فرصة Scale</span>' : '<span class="badge bad">تجاوز</span>'} ${esc(a.product_name)} — <span class="muted small">${esc(REASON_TEXT[a.reason] || a.reason || '')}</span></span>
+            <span>${a.alert_type === 'scale' ? '<span class="badge good">فرصة Scale</span>' : String(a.alert_type).startsWith('rule:') ? '<span class="badge warn">قاعدة</span>' : '<span class="badge bad">تجاوز</span>'} ${esc(a.product_name)} — <span class="muted small">${esc(REASON_TEXT[a.reason] || a.reason || '')}</span></span>
             <span class="who num">${esc(a.adset_id)}</span></li>`).join('')}</ul>`
           : '<div class="empty"><p>مفيش تنبيهات لسه.</p></div>')}
       </div>
@@ -524,7 +850,7 @@ async function viewLogs(main) {
 
 // ==================== الأحداث ====================
 document.addEventListener('click', async (e) => {
-  const el = e.target.closest('[data-tab],[data-action],[data-days],[data-filter],[data-pct],[data-logs]');
+  const el = e.target.closest('[data-tab],[data-action],[data-days],[data-filter],[data-pct],[data-logs],[data-av],[data-trend-days],[data-cmp-days],[data-hourly-days],[data-hourly-metric]');
   if (!el) return;
 
   if (el.dataset.tab) {
@@ -537,13 +863,59 @@ document.addEventListener('click', async (e) => {
     state.productFilter = state.productFilter === el.dataset.filter ? null : el.dataset.filter;
     return renderTab();
   }
-  if (el.dataset.pct) { $dlg.querySelector('[data-custom-pct]').value = ''; return setBudgetPct(parseInt(el.dataset.pct)); }
+  if (el.dataset.pct && !el.dataset.action) { $dlg.querySelector('[data-custom-pct]').value = ''; return setBudgetPct(parseInt(el.dataset.pct)); }
   if (el.dataset.logs) { state.logsView = el.dataset.logs; return renderTab(); }
+  if (el.dataset.av) { state.analysisView = el.dataset.av; return renderTab(); }
+  if (el.dataset.trendDays) { state.trendDays = parseInt(el.dataset.trendDays); return viewTrend(document.getElementById('av')); }
+  if (el.dataset.cmpDays) { state.compareDays = parseInt(el.dataset.cmpDays); return viewCompare(document.getElementById('av')); }
+  if (el.dataset.hourlyDays) { state.hourlyDays = parseInt(el.dataset.hourlyDays); return viewHourly(document.getElementById('av')); }
+  if (el.dataset.hourlyMetric) { state.hourlyMetric = el.dataset.hourlyMetric; return viewHourly(document.getElementById('av')); }
 
   const a = el.dataset.action;
   const id = el.dataset.id;
   switch (a) {
     case 'close': return $dlg.close();
+    case 'ads': return adsDialog(id);
+    case 'ads-days': return adsDialog(id, parseInt(el.dataset.d), !!el.dataset.refresh);
+    case 'hourly-refresh': return viewHourly(document.getElementById('av'), true);
+    case 'sel-all': {
+      const live = state.overview.adsets.filter(x => x.activeToday && (!state.productFilter || x.product === state.productFilter));
+      const all = live.every(x => state.selected.has(x.id));
+      live.forEach(x => (all ? state.selected.delete(x.id) : state.selected.add(x.id)));
+      return renderTab();
+    }
+    case 'sel-clear': state.selected.clear(); document.querySelectorAll('[data-sel]').forEach(c => { c.checked = false; }); return renderBulkBar();
+    case 'bulk': {
+      if (el.dataset.op === 'pause') return bulkDialog('pause');
+      const pct = el.dataset.custom != null ? parseInt(document.querySelector('[data-bulk-pct]').value) : parseInt(el.dataset.bp);
+      if (!pct || pct < -90 || pct > 200) return toast('النسبة من -90% لـ +200%', true);
+      return bulkDialog('budget', pct);
+    }
+    case 'confirm-bulk': {
+      const body = { ids: [...state.selected], op: el.dataset.op, pct: parseInt(el.dataset.bp) || undefined };
+      const r = await run(el, () => api('/adsets/bulk', { method: 'POST', body }));
+      if (!r) return;
+      $dlg.close();
+      if (r.ok.length) toast(`اتنفذ على ${r.ok.length} — وفريقك اتبلغ`);
+      if (r.failed.length) toast(`ما اتنفذش على ${r.failed.length}: ${r.failed.map(f => `${f.name || f.id} (${f.error})`).join(' | ')}`, true);
+      state.selected.clear();
+      return renderTab();
+    }
+    case 'rule-new': return ruleForm();
+    case 'rule-tpl': return ruleForm({ ...RULE_TEMPLATES[parseInt(el.dataset.i)] });
+    case 'rule-edit': return ruleForm(state.rulesMeta.rules.find(x => x.id === id));
+    case 'rule-cancel': document.getElementById('rule-form').innerHTML = ''; return;
+    case 'rule-del': {
+      const x = state.rulesMeta.rules.find(r => r.id === id);
+      openDialog(`<div class="dlg-head"><h3>حذف القاعدة</h3></div><div class="dlg-body"><p>${bdi(x.name)}</p></div>
+        <div class="dlg-foot"><button class="btn danger" data-action="confirm-rule-del" data-id="${esc(id)}">حذف</button><button class="btn ghost" data-action="close">إلغاء</button></div>`);
+      return;
+    }
+    case 'confirm-rule-del': {
+      const r = await run(el, () => api(`/rules/${encodeURIComponent(id)}`, { method: 'DELETE' }));
+      if (r) { $dlg.close(); toast('اتحذفت'); renderTab(); }
+      return;
+    }
     case 'reload': return renderTab();
     case 'logout':
       await api('/logout', { method: 'POST' }).catch(() => {});
@@ -681,6 +1053,23 @@ document.addEventListener('change', async (e) => {
     return renderShell();
   }
   if (t.matches('.pick input')) updateAccCount(t.closest('[data-acc]'));
+  if (t.matches('[data-sel]')) { t.checked ? state.selected.add(t.dataset.sel) : state.selected.delete(t.dataset.sel); return renderBulkBar(); }
+  if (t.matches('[data-trend-product]')) { state.trendProduct = t.value; return viewTrend(document.getElementById('av')); }
+  if (t.matches('[data-hourly-product]')) { state.hourlyProduct = t.value; return viewHourly(document.getElementById('av')); }
+  if (t.matches('[data-rule-cond]')) {
+    const c = state.rulesMeta.conditions[t.value];
+    t.form.querySelector('[data-days-wrap]').hidden = !c.daysAllowed;
+    t.form.threshold.value = { cpp_above: 130, cpp_below: 70, spend_no_sales: 200 }[t.value];
+  }
+  if (t.matches('[data-rule-act]')) {
+    t.form.querySelector('[data-pct-wrap]').hidden = !['budget_down', 'budget_up'].includes(t.value);
+    t.form.querySelector('[data-mode-wrap]').hidden = t.value === 'notify';
+  }
+  if (t.matches('[data-rule-toggle]')) {
+    const x = state.rulesMeta.rules.find(r => r.id === t.dataset.ruleToggle);
+    try { await api(`/rules/${encodeURIComponent(x.id)}`, { method: 'PUT', body: { ...x, enabled: t.checked } }); toast(t.checked ? 'القاعدة اشتغلت' : 'القاعدة اتوقفت'); renderTab(); }
+    catch (err) { toast(err.message, true); t.checked = !t.checked; }
+  }
 });
 
 document.addEventListener('keydown', (e) => {
@@ -708,6 +1097,14 @@ document.addEventListener('submit', async (e) => {
     const r = await run(btn, () => api('/products', { method: 'POST', body }));
     if (r) { toast(`اتضاف ${body.name}`); await refreshMe(); renderTab(); }
   }
+  if (form.dataset.form === 'rule') {
+    const fd = Object.fromEntries(new FormData(form));
+    const body = { ...fd, product: fd.product || null };
+    const id = state.editingRule;
+    const r = await run(btn, () => api(id ? `/rules/${encodeURIComponent(id)}` : '/rules', { method: id ? 'PUT' : 'POST', body }));
+    if (r) { toast(id ? 'اتحفظت' : 'القاعدة اتضافت وهتشتغل من الفحص الجاي'); state.editingRule = null; renderTab(); }
+    return;
+  }
   if (form.dataset.form === 'settings') {
     const values = {};
     form.querySelectorAll('input[name]').forEach(i => { if (i.value !== i.dataset.orig) values[i.name] = i.value; });
@@ -728,6 +1125,8 @@ async function refreshMe() {
   if (state.me.role === 'admin' && state.me.tenant) localStorage.setItem('tenant', state.me.tenant.id);
   return state.me;
 }
+
+$dlg.addEventListener('close', () => $dlg.classList.remove('wide'));
 
 (async function init() {
   try {

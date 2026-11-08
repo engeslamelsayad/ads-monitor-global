@@ -31,6 +31,14 @@ class Tenant {
   get tz() { return this.settings.timezone; }
   get currency() { return this.settings.currency; }
   today() { return time.todayString(this.tz); }
+  // آخر محاولة مراجعة (ناجحة أو لا) + الميعاد الجاي — محفوظين على الـ Volume فالـ deploy مش بيلخبطهم
+  get lastCycleAt() {
+    return Math.max(parseInt(this.db.getState('last_cycle', '0')) || 0, parseInt(this.db.getState('last_cycle_attempt', '0')) || 0) || null;
+  }
+  get nextCycleAt() {
+    const last = this.lastCycleAt;
+    return last ? last + this.settings.intervalMinutes * 60000 : Date.now();
+  }
   daysAgo(n) { return time.daysAgoString(n, this.tz); }
   nowTime() { return time.timeString(this.tz); }
 
@@ -101,6 +109,10 @@ class Tenant {
   recentActions(limit = 200) { return (this.db.load().actions || []).slice(-limit).reverse(); }
 
   // ---------- سياق الأزرار ----------
+  // ---------- القواعد التلقائية ----------
+  get rules() { return this.db.load().rules || []; }
+  saveRules(list) { this.db.mutate(d => { d.rules = list; }); }
+
   storeContext(data) {
     const key = `c${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
     this.db.storeContext(key, { ...data, timestamp: Date.now() });

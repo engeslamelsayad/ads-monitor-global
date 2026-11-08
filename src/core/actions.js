@@ -16,6 +16,7 @@ const api = {
 
 // actor: { via: 'telegram'|'dashboard', chatId }
 function actorLabel(actor) {
+  if (actor.via === 'rule') return `قاعدة تلقائية "${actor.chatId}"${actor.note ? `\n📐 ${actor.note}` : ''}`;
   return `${actor.chatId}${actor.via === 'dashboard' ? ' (من الداشبورد)' : ''}`;
 }
 
@@ -41,23 +42,24 @@ function contextFromAdset(t, adsetId) {
   };
 }
 
-async function pause(t, ctx, actor) {
+// opts.silent: من غير إشعار (الإجراءات الجماعية بتبعت ملخص واحد)
+async function pause(t, ctx, actor, opts = {}) {
   const r = await api.pause(t, ctx);
-  t.logAction(actor, 'pause', { adset: ctx.adsetName, adsetId: ctx.adsetId, product: ctx.productName, platform: ctx.platform });
-  await notifyTeam(t, actor, `⏸ تم إيقاف ${ctx.platform === 'tiktok' ? 'Ad Group' : 'Ad Set'}\n📑 ${r.newName}\n👤 بواسطة: ${actorLabel(actor)}`);
+  t.logAction(actor, 'pause', { adset: ctx.adsetName, adsetId: ctx.adsetId, product: ctx.productName, platform: ctx.platform, ...(opts.log || {}) });
+  if (!opts.silent) await notifyTeam(t, actor, `⏸ تم إيقاف ${ctx.platform === 'tiktok' ? 'Ad Group' : 'Ad Set'}\n📑 ${r.newName}\n👤 بواسطة: ${actorLabel(actor)}`);
   return r;
 }
 
 // pct موجب = رفع، سالب = تقليل
-async function changeBudget(t, ctx, pct, actor) {
+async function changeBudget(t, ctx, pct, actor, opts = {}) {
   const up = pct > 0;
   const r = up ? await api.increase(t, ctx, pct) : await api.reduce(t, ctx, Math.abs(pct));
   if (!r.success) return r;
   t.logAction(actor, up ? 'budget_up' : 'budget_down', {
     adset: r.adsetName, adsetId: ctx.adsetId, product: ctx.productName, platform: ctx.platform,
-    pct, from: r.oldBudget, to: r.newBudget
+    pct, from: r.oldBudget, to: r.newBudget, ...(opts.log || {})
   });
-  await notifyTeam(t, actor,
+  if (!opts.silent) await notifyTeam(t, actor,
     `${up ? '🚀 تم رفع' : '💰 تم تقليل'} ميزانية\n📑 ${r.adsetName}\n${up ? '+' : ''}${pct}% → ${Number(r.newBudget).toFixed(2)} ${t.currency}\n👤 بواسطة: ${actorLabel(actor)}`);
   return r;
 }

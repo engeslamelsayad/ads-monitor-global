@@ -10,6 +10,23 @@ const time = require('./utils/time');
 
 let cyclesRunning = false;
 
+// كل دقيقة: نشغّل دورة لأي عميل عدّى عليه وقت المراجعة بتاعه (intervalMinutes)
+// الحساب من آخر مراجعة محفوظة — مش من وقت تشغيل السيرفر
+async function runDueCycles() {
+  if (cyclesRunning) return;
+  const due = registry.list().filter(t => t.active && t.bot && t.isReady && !t.cycleRunning && Date.now() >= t.nextCycleAt - 30000);
+  if (!due.length) return;
+  cyclesRunning = true;
+  try {
+    for (const t of due) {
+      t.db.setState('last_cycle_attempt', String(Date.now())); // حتى لو فشلت ما نعيدش كل دقيقة
+      try { await engine.runCycle(t); } catch (err) { t.log.error('Cycle failed', err); }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  } finally { cyclesRunning = false; }
+}
+
+// تشغيل يدوي لكل العملاء (/check_all)
 async function runAllCycles() {
   if (cyclesRunning) { logger.warn('Cycles already running — skip'); return []; }
   cyclesRunning = true;
@@ -18,6 +35,7 @@ async function runAllCycles() {
     for (const t of registry.list()) {
       if (!t.active || !t.bot || !t.isReady) continue;
       try {
+        t.db.setState('last_cycle_attempt', String(Date.now()));
         out.push({ name: t.name, result: await engine.runCycle(t) });
       } catch (err) {
         t.log.error('Cycle failed', err);
@@ -55,6 +73,16 @@ async function runDailyPipeline(t) {
     await sendLongToAll(t, `📋 التقرير اليومي — ${t.today()}\n\n${report}`);
   } catch (err) { t.log.error('Daily report failed', err); }
 
+  // 1.5) نتايج القرارات اللي اكتملت (قبل/بعد 3 أيام)
+  try {
+    const oc = require('./core/outcomes');
+    const fresh = oc.collectNewFinals(t);
+    if (fresh.length) {
+      const body = fresh.slice(0, 15).map(o => oc.describe(o, t.currency)).join('\n');
+      await sendLongToAll(t, `📊 نتيجة قراراتك (3 أيام قبل وبعد)\n\n${body}${fresh.length > 15 ? `\n… و ${fresh.length - 15} كمان في الداشبورد` : ''}\n\nكل القرارات: /decisions`);
+    }
+  } catch (err) { t.log.error('Outcomes follow-up failed', err); }
+
   // 2) تحليل عميق للمنتجات اللي فوق الحد يومين متتاليين
   for (const b of engine.checkConsecutiveBreaches(t)) {
     try {
@@ -89,11 +117,12 @@ async function checkTokens(t) {
 }
 
 function startAll() {
-  // أول دورة بعد دقيقة من التشغيل (البوتات تكون اشتغلت)
-  setTimeout(runAllCycles, 60 * 1000);
-  setInterval(runAllCycles, config.monitor.intervalMs);
+  setInterval(() => runDueCycles().catch(err => logger.error('Due cycles failed', err)), config.monitor.tickMs);
   cron.schedule('*/5 * * * *', () => checkReports().catch(err => logger.error('Report check failed', err)));
-  logger.success(`Scheduler started — cycles every ${config.monitor.intervalMs / 60000} min, reports per tenant time`);
+  for (const t of registry.list()) {
+    if (t.isReady) t.log.info(`Next check ${time.formatTs(t.nextCycleAt, t.tz)} (every ${t.settings.intervalMinutes} min)`);
+  }
+  logger.success('Scheduler started — per-tenant interval, reports per tenant time');
 }
 
-module.exports = { startAll, runAllCycles, runDailyPipeline };
+module.exports = { startAll, runAllCycles, runDueCycles, runDailyPipeline };

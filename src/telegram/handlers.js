@@ -30,6 +30,19 @@ async function handleCallback(tenant, query) {
   const cur = tenant.currency;
 
   switch (type) {
+    // ---------- تأكيد قاعدة تلقائية ----------
+    case 'rl': {
+      if (ctx.done) return edit(tenant, chatId, msgId, `ℹ️ القاعدة دي اتنفذت قبل كده بواسطة ${ctx.done}`, { plain: true });
+      tenant.db.storeContext(key, { ...ctx, done: chatId, timestamp: ctx.timestamp });
+      try {
+        const text = await require('../core/rules').applyConfirmed(tenant, ctx, chatId);
+        return edit(tenant, chatId, msgId, `📐 ${ctx.ruleName}\n\n${text}`, { plain: true });
+      } catch (err) {
+        tenant.log.error('Rule apply failed', err);
+        return edit(tenant, chatId, msgId, `❌ فشل التنفيذ\n\n${err.message}`, { plain: true });
+      }
+    }
+
     // ---------- إيقاف ----------
     case 'pause':
       return edit(tenant, chatId, msgId,

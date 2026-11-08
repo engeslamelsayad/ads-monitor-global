@@ -47,11 +47,12 @@ const config = {
     highSpendPct: 250,        // إنفاق > 250% من Max مع مبيعات أقل من الحد الأدنى
     scalePct: 60,             // فرصة Scale عند CPP أقل من 60% من Max
     scaleCooldownHours: 8,
-    reportTime: '22:30'
+    reportTime: '22:30',
+    intervalMinutes: 90       // المراجعة الدورية كل ساعة ونص
   },
 
   monitor: {
-    intervalMs: 90 * 60 * 1000,
+    tickMs: 60 * 1000,        // كل دقيقة بنشوف مين عميل جه ميعاد مراجعته
     triDayIntervalDays: 3
   }
 };

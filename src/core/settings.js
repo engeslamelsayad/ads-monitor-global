@@ -1,5 +1,6 @@
 // تعريف إعدادات العميل القابلة للتعديل — مشترك بين أوامر Telegram والداشبورد
 const SETTINGS = {
+  interval: { key: 'intervalMinutes', label: 'المراجعة الدورية كل', unit: 'دقيقة', min: 30, max: 240, type: 'number' },
   cooldown: { key: 'cooldownHours', label: 'الانتظار بين تنبيهات نفس الـ Ad Set', unit: 'ساعة', min: 1, max: 24, type: 'number' },
   buffer: { key: 'bufferPct', label: 'التنبيه عند تجاوز', unit: '% من Max CPP', min: 100, max: 200, type: 'number' },
   min_purchases: { key: 'minPurchases', label: 'أقل مشتريات قبل حساب CPP', unit: 'مشترية', min: 1, max: 20, type: 'number' },

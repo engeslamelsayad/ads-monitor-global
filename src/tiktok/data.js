@@ -59,6 +59,51 @@ async function getCampaignInsights(tenant, adv, days = 7) {
     .map(([id, m]) => ({ dimensions: { campaign_id: id }, metrics: { spend: String(m.spend), conversion: String(m.conversion) } }));
 }
 
+// خريطة الساعات — التقرير بالساعة بنطلبه يوم بيوم (TikTok بيحدد مداه)
+async function getHourlyRange(tenant, adv, dates, campaignIds = null) {
+  const out = [];
+  const only = campaignIds ? new Set(campaignIds.map(String)) : null;
+  for (const date of dates) {
+    const rows = await report(tenant, adv, only
+      ? { dimensions: ['campaign_id', 'stat_time_hour'], level: 'AUCTION_CAMPAIGN', metrics: ['spend', 'conversion'], start: date, end: date }
+      : { dimensions: ['stat_time_hour'], level: 'AUCTION_ADVERTISER', metrics: ['spend', 'conversion'], start: date, end: date });
+    for (const r of rows) {
+      if (only && !only.has(String(r.dimensions?.campaign_id))) continue;
+      const st = String(r.dimensions?.stat_time_hour || '');
+      out.push({ date: st.slice(0, 10) || date, hour: parseInt(st.slice(11, 13)) || 0,
+        spend: parseFloat(r.metrics?.spend || 0), purchases: parseFloat(r.metrics?.conversion || 0) });
+    }
+  }
+  return out;
+}
+
+// مستوى الإعلان جوه Ad Group
+async function getAdsOfAdgroup(tenant, adv, adgroupId, from, to) {
+  const [ads, rows] = await Promise.all([
+    tiktokGetAllPages(tenant, '/ad/get/', {
+      advertiser_id: adv, fields: JSON.stringify(['ad_id', 'ad_name', 'adgroup_id', 'create_time', 'operation_status']),
+      filtering: JSON.stringify({ adgroup_ids: [adgroupId] })
+    }),
+    (async () => {
+      const opts = { dimensions: ['ad_id'], level: 'AUCTION_AD', start: from, end: to };
+      try { return await report(tenant, adv, { ...opts, metrics: ['spend', 'impressions', 'clicks', 'ctr', 'frequency', 'conversion', 'video_watched_2s', 'video_play_complete_rate'] }); }
+      catch (err) { if (err.code !== 40002) throw err; return report(tenant, adv, { ...opts, metrics: ['spend', 'impressions', 'clicks', 'ctr', 'conversion'] }); }
+    })()
+  ]);
+  const byAd = Object.fromEntries(rows.map(r => [String(r.dimensions?.ad_id), r]));
+  return ads.map(a => {
+    const row = byAd[String(a.ad_id)];
+    const m = row ? parseTiktokInsights(row) : null;
+    return {
+      id: String(a.ad_id), name: a.ad_name, status: a.operation_status === 'ENABLE' ? 'ACTIVE' : (a.operation_status || ''),
+      createdAt: a.create_time ? a.create_time.replace(' ', 'T') + 'Z' : null, thumb: null,
+      spend: m?.spend || 0, impressions: m?.impressions || 0, clicks: m?.clicks || 0, ctr: m?.ctr || 0,
+      frequency: m?.frequency || 0, purchases: m?.purchases || 0,
+      cpp: m && m.purchases ? m.spend / m.purchases : null, hookRate: m?.hookRate || 0, holdRate: m?.holdRate || 0
+    };
+  });
+}
+
 // تحويل صف TikTok لنفس شكل metrics بتاع Meta
 function parseTiktokInsights(row) {
   const m = row.metrics || {};
@@ -82,4 +127,4 @@ function parseTiktokInsights(row) {
   };
 }
 
-module.exports = { getCampaigns, getAdgroups, getAdgroupInsightsToday, getCampaignInsights, parseTiktokInsights };
+module.exports = { getCampaigns, getAdgroups, getAdgroupInsightsToday, getCampaignInsights, parseTiktokInsights, getHourlyRange, getAdsOfAdgroup };

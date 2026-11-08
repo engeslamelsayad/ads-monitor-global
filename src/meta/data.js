@@ -66,6 +66,48 @@ async function getHourlyToday(tenant, accountId) {
   });
 }
 
+// خريطة الساعات: صرف ومشتريات لكل يوم × ساعة (بتوقيت الحساب) — اختيارياً لحملات معينة
+async function getHourlyRange(tenant, accountId, from, to, campaignIds = null) {
+  const params = {
+    fields: 'spend,actions', level: 'account', time_increment: 1,
+    time_range: JSON.stringify({ since: from, until: to }),
+    breakdowns: 'hourly_stats_aggregated_by_advertiser_time_zone', limit: 500
+  };
+  if (campaignIds?.length) params.filtering = JSON.stringify([{ field: 'campaign.id', operator: 'IN', value: campaignIds }]);
+  const rows = await metaGetAll(tenant, `${act(accountId)}/insights`, params);
+  const { getActionValue } = require('../utils/metrics');
+  return rows.map(r => ({
+    date: r.date_start,
+    hour: parseInt(String(r.hourly_stats_aggregated_by_advertiser_time_zone || '0').slice(0, 2)),
+    spend: parseFloat(r.spend || 0),
+    purchases: getActionValue(r.actions, 'purchase')
+  }));
+}
+
+// مستوى الإعلان جوه Ad Set: الأداء + الكريتيف + العمر
+async function getAdsOfAdset(tenant, adsetId, from, to) {
+  const [ads, rows] = await Promise.all([
+    metaGetAll(tenant, `/${adsetId}/ads`, { fields: 'id,name,effective_status,created_time,creative{thumbnail_url}', limit: 100 }, 3),
+    metaGetAll(tenant, `/${adsetId}/insights`, {
+      fields: 'ad_id,ad_name,spend,impressions,clicks,ctr,cpm,frequency,actions,video_thruplay_watched_actions',
+      level: 'ad', time_range: JSON.stringify({ since: from, until: to }), limit: 200
+    }, 3)
+  ]);
+  const { parseInsights } = require('../utils/metrics');
+  const byAd = Object.fromEntries(rows.map(r => [r.ad_id, r]));
+  return ads.map(a => {
+    const m = byAd[a.id] ? parseInsights(byAd[a.id]) : null;
+    return {
+      id: a.id, name: a.name, status: a.effective_status, createdAt: a.created_time || null,
+      thumb: a.creative?.thumbnail_url || null,
+      spend: m?.spend || 0, impressions: m?.impressions || 0, clicks: m?.clicks || 0, ctr: m?.ctr || 0,
+      frequency: m?.frequency || 0, purchases: m?.purchases || 0,
+      cpp: m && m.purchases ? m.spend / m.purchases : null,
+      hookRate: m?.hookRate || 0, holdRate: m?.holdRate || 0
+    };
+  });
+}
+
 // نص الإعلانات + Landing Page (للتحليل العميق)
 async function getAdCopyAndLanding(tenant, campaignId, max = 3) {
   const adsets = await metaGetAll(tenant, `/${campaignId}/adsets`, { fields: 'id', limit: 3 }, 1);
@@ -90,5 +132,5 @@ async function getAdCopyAndLanding(tenant, campaignId, max = 3) {
 
 module.exports = {
   getActiveAdsets, getAdsetInsightsToday, getCampaignInsights, getActiveCampaigns,
-  getHistoricalInsights, getHourlyToday, getAdCopyAndLanding
+  getHistoricalInsights, getHourlyToday, getAdCopyAndLanding, getHourlyRange, getAdsOfAdset
 };
