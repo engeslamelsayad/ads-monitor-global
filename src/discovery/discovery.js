@@ -8,16 +8,17 @@ const state = require('../telegram/state');
 // وضع الاكتشاف: يقرا الحملات اللي صرفت آخر 7 أيام → AI يجمّعها في منتجات
 // → يقترح Max CPP من الأداء الفعلي → المستخدم يعتمد بالأزرار منتج منتج
 
-const DAYS = 7;
+const DEFAULT_DAYS = 7;
+const MAX_DAYS = 90;
 const r1 = (n) => Math.round((n || 0) * 10) / 10;
 
 // ---------- 1) جمع الحملات ----------
-async function collectCampaigns(t) {
+async function collectCampaigns(t, days) {
   const out = [];
   const errors = [];
   for (const acc of t.metaAccounts) {
     try {
-      for (const c of await metaData.getCampaignInsights(t, acc, `last_${DAYS}d`)) {
+      for (const c of await metaData.getCampaignInsights(t, acc, days)) {
         out.push({ platform: 'meta', account: acc, id: c.campaign_id, name: c.campaign_name,
           spend: parseFloat(c.spend || 0), purchases: getActionValue(c.actions, 'purchase') });
       }
@@ -25,7 +26,7 @@ async function collectCampaigns(t) {
   }
   for (const adv of t.tiktokAdvertisers) {
     try {
-      const [camps, ins] = await Promise.all([ttData.getCampaigns(t, adv), ttData.getCampaignInsights(t, adv, DAYS)]);
+      const [camps, ins] = await Promise.all([ttData.getCampaigns(t, adv), ttData.getCampaignInsights(t, adv, days)]);
       const names = Object.fromEntries(camps.map(c => [String(c.campaign_id), c.campaign_name]));
       for (const r of ins) {
         const id = String(r.dimensions?.campaign_id);
@@ -88,15 +89,16 @@ function validateGroups(groups, unmatched, allCampaigns) {
 }
 
 // ---------- 3) بدء الجلسة ----------
-async function start(t, chatId) {
+async function start(t, chatId, requestedDays) {
+  const days = Math.min(Math.max(parseInt(requestedDays) || DEFAULT_DAYS, 1), MAX_DAYS);
   if (!t.setupStatus.meta && !t.setupStatus.tiktok) {
     return send(t, chatId, '⚠️ اربط Meta أو TikTok الأول — /setup', { plain: true });
   }
-  const wait = await send(t, chatId, `🔍 جاري استكشاف الحملات اللي صرفت آخر ${DAYS} أيام...`, { plain: true });
-  const { campaigns, errors } = await collectCampaigns(t);
+  const wait = await send(t, chatId, `🔍 جاري استكشاف الحملات اللي صرفت آخر ${days} يوم...`, { plain: true });
+  const { campaigns, errors } = await collectCampaigns(t, days);
   if (errors.length) t.log.warn(`Discovery errors: ${errors.join(' | ')}`);
   if (!campaigns.length) {
-    return edit(t, chatId, wait.message_id, `لا توجد حملات صرفت آخر ${DAYS} أيام.${errors.length ? `\n\n⚠️ ${errors.join('\n')}` : ''}`, { plain: true });
+    return edit(t, chatId, wait.message_id, `لا توجد حملات صرفت آخر ${days} يوم.${errors.length ? `\n\n⚠️ ${errors.join('\n')}` : ''}`, { plain: true });
   }
 
   const unmatched = campaigns.filter(c => !t.matchProduct(c.name));
@@ -118,21 +120,22 @@ async function start(t, chatId) {
   }
   if (!groups.length) return send(t, chatId, '🤷 مقدرتش أحدد منتجات واضحة من الأسماء — ضيفها يدوياً بـ /add_product', { plain: true });
 
-  const key = t.storeContext({ dv: true, groups, idx: 0, added: [], linked: [], skipped: [] });
+  const key = t.storeContext({ dv: true, days, groups, idx: 0, added: [], linked: [], skipped: [] });
   await send(t, chatId, `✨ لقيت ${groups.length} منتج مقترح — هنراجعهم واحد واحد 👇`, { plain: true });
   return showCard(t, chatId, key);
 }
 
 // ---------- 4) كارت المنتج ----------
-function cardText(t, g, i, n) {
+function cardText(t, g, i, n, days = DEFAULT_DAYS) {
   const cur = t.currency;
   let s = `📦 منتج مقترح ${i + 1}/${n}: ${g.name}\n\n`;
   s += `🔑 كلمات المطابقة: ${g.keys.length ? g.keys.join(' ، ') : '⚠️ مفيش كلمة مميزة — اضغط "تغيير الاسم" واكتب كلمة موجودة في أسماء الحملات'}\n\n`;
   s += `الحملات (${g.campaigns.length}):\n`;
   s += g.campaigns.slice(0, 8).map(c => `${c.covered ? '•' : '⚠️'} ${c.platform === 'tiktok' ? '🎵' : '🔵'} ${c.name}`).join('\n');
   if (g.campaigns.length > 8) s += `\n• ... و${g.campaigns.length - 8} أخرى`;
-  s += `\n\n📊 آخر ${DAYS} أيام: Spend ${r1(g.spend)} ${cur} | 🛒 ${g.purchases} | CPP ${g.purchases ? r1(g.cpp) : '—'}\n`;
-  s += g.suggested ? `💡 Max CPP المقترح: ${g.suggested} (الفعلي + 10%)` : '💡 مبيعات قليلة — حدد Max CPP بنفسك';
+  s += `\n\n📊 آخر ${days} يوم: Spend ${r1(g.spend)} ${cur} | 🛒 ${g.purchases} | CPP ${g.purchases ? r1(g.cpp) : '—'}\n`;
+  s += g.suggested ? `💡 Max CPP المقترح: ${g.suggested} (الفعلي + 10%)`
+    : `💡 مبيعات قليلة — حدد Max CPP بنفسك${days < 30 ? ` أو جرّب /discover ${Math.min(days * 2 > 30 ? 30 : days * 2, MAX_DAYS)} لفترة أطول` : ''}`;
   if (g.existing) s += `\n\n🔗 شكله نفس منتج "${g.existing}" المسجل`;
   return s;
 }
@@ -154,7 +157,7 @@ async function showCard(t, chatId, key, msgId = null) {
   if (!s) return send(t, chatId, '❌ انتهت جلسة الاكتشاف — /discover', { plain: true });
   if (s.idx >= s.groups.length) return finish(t, chatId, key, msgId);
   const g = s.groups[s.idx];
-  const text = cardText(t, g, s.idx, s.groups.length);
+  const text = cardText(t, g, s.idx, s.groups.length, s.days);
   const opts = { plain: true, reply_markup: cardKeyboard(key, g) };
   return msgId ? edit(t, chatId, msgId, text, opts) : send(t, chatId, text, opts);
 }

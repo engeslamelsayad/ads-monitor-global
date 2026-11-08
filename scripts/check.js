@@ -199,6 +199,30 @@ const ok = (name) => { passed++; console.log('✅', name); };
   assert(btns(sentMsgs.find(m => m.text.includes('129'))).every(b => Buffer.byteLength(b.callback_data) <= 64));
   ok('account picker: 129 accounts, pages, search by name/ID, save');
 
-  console.log(`\n🎉 ${passed}/12 checks passed`);
+
+  // 13) فترة الاكتشاف: Meta بـ time_range، و TikTok متقسم لشرائح 30 يوم ومتجمع
+  const mc = require('../src/meta/client'), tc = require('../src/tiktok/client');
+  const realGetAll = mc.metaGetAll, realTtGet = tc.tiktokGet;
+  let metaParams = null; const ttRanges = [];
+  mc.metaGetAll = async (tt, path, params) => { metaParams = params; return [{ campaign_id: 'c1', campaign_name: 'x', spend: '10', actions: [] }]; };
+  tc.tiktokGet = async (tt, path, params) => { ttRanges.push([params.start_date, params.end_date]); return { data: { list: [{ dimensions: { campaign_id: 'k1' }, metrics: { spend: '100', conversion: '2' } }] } }; };
+  for (const m of ['../src/meta/data', '../src/tiktok/data']) delete require.cache[require.resolve(m)];
+  const md2 = require('../src/meta/data'), td2 = require('../src/tiktok/data');
+  await md2.getCampaignInsights(t, '111', 30);
+  const tr = JSON.parse(metaParams.time_range);
+  assert.strictEqual(tr.until, t.today()); assert.strictEqual(tr.since, t.daysAgo(29)); assert(!metaParams.date_preset);
+  const ttRows = await td2.getCampaignInsights(t, 'adv', 90);
+  assert.strictEqual(ttRanges.length, 3, 'TikTok 90 days → 3 chunks');
+  assert.strictEqual(ttRanges[0][1], t.today()); assert.strictEqual(ttRanges[2][0], t.daysAgo(89));
+  assert.strictEqual(ttRows[0].metrics.spend, '300'); assert.strictEqual(ttRows[0].metrics.conversion, '6');
+  ttRanges.length = 0; await td2.getCampaignInsights(t, 'adv', 7);
+  assert.deepStrictEqual(ttRanges, [[t.daysAgo(6), t.today()]]);
+  mc.metaGetAll = realGetAll; tc.tiktokGet = realTtGet;
+  // الأمر يقبل الرقم
+  assert(handlersMap.find(([re]) => re.test('/discover 30'))[0].exec('/discover 30')[1] === '30');
+  assert(handlersMap.find(([re]) => re.test('/discover'))[0].exec('/discover')[1] === undefined);
+  ok('discovery period: Meta time_range, TikTok 30-day chunks summed, /discover N');
+
+  console.log(`\n🎉 ${passed}/13 checks passed`);
   fs.rmSync(process.env.DATA_DIR, { recursive: true, force: true });
 })().catch(err => { console.error('❌ CHECK FAILED:', err); process.exit(1); });

@@ -47,7 +47,7 @@ Business Settings ← Users ← System Users ← Add (Admin) ← Add Assets (ا�
 | **متابعة** | `/status` `/top` `/worst` `/budget` `/product اسم` `/week اسم` |
 | **تحكم** | `/pause_product اسم` + أزرار الإيقاف والميزانية في التنبيهات |
 | **AI** | `/ask سؤال` |
-| **إعداد** | `/setup` `/discover` `/unmatched` |
+| **إعداد** | `/setup` `/discover` `/discover 30` `/unmatched` |
 | **منتجات** | `/products` `/add_product` `/edit_cpp` `/remove_product` `/add_alias` `/remove_alias` |
 | **حسابات** | `/accounts` `/add_account` `/remove_account` |
 | **نظام** | `/settings` `/set` `/users` `/invite` `/add_user` `/remove_user` `/check` `/help` |

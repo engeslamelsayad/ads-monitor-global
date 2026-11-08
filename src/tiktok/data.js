@@ -39,12 +39,24 @@ async function getAdgroupInsightsToday(tenant, adv) {
 }
 
 // مستوى الحملة لآخر N يوم (للـ discovery)
+// TikTok بيحدد مدى التقرير — بنقسم الفترة لشرائح 30 يوم ونجمع النتايج لكل حملة
 async function getCampaignInsights(tenant, adv, days = 7) {
-  const rows = await report(tenant, adv, {
-    dimensions: ['campaign_id'], level: 'AUCTION_CAMPAIGN',
-    metrics: ['spend', 'conversion'], start: tenant.daysAgo(days - 1), end: tenant.today()
-  });
-  return rows.filter(r => parseFloat(r.metrics?.spend || 0) > 0);
+  const totals = {};
+  for (let end = 0; end < days; end += 30) {
+    const span = Math.min(30, days - end);
+    const rows = await report(tenant, adv, {
+      dimensions: ['campaign_id'], level: 'AUCTION_CAMPAIGN', metrics: ['spend', 'conversion'],
+      start: tenant.daysAgo(end + span - 1), end: tenant.daysAgo(end)
+    });
+    for (const r of rows) {
+      const id = String(r.dimensions?.campaign_id);
+      const x = totals[id] ||= { spend: 0, conversion: 0 };
+      x.spend += parseFloat(r.metrics?.spend || 0);
+      x.conversion += parseFloat(r.metrics?.conversion || 0);
+    }
+  }
+  return Object.entries(totals).filter(([, m]) => m.spend > 0)
+    .map(([id, m]) => ({ dimensions: { campaign_id: id }, metrics: { spend: String(m.spend), conversion: String(m.conversion) } }));
 }
 
 // تحويل صف TikTok لنفس شكل metrics بتاع Meta

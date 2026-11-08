@@ -25,7 +25,8 @@ const HELP = (t) => `🤖 ${t.name} — مراقبة إعلانات Meta & TikTo
 
 🧭 الإعداد والاكتشاف
 /setup — ربط Meta و TikTok
-/discover — استكشاف الحملات واقتراح المنتجات
+/discover — استكشاف حملات آخر 7 أيام واقتراح المنتجات
+/discover 30 — نفس الكلام لآخر 30 يوم (من 1 لـ 90)
 /unmatched — حملات شغالة من غير مراقبة
 
 🛠 المنتجات والحسابات
@@ -116,7 +117,7 @@ function register(tenant) {
   });
 
   on(/^\/setup/, (msg) => require('./setup').start(tenant, msg.chat.id));
-  on(/^\/discover/, (msg) => require('../discovery/discovery').start(tenant, msg.chat.id));
+  on(/^\/discover(?:\s+(\d+))?/, (msg, m) => require('../discovery/discovery').start(tenant, msg.chat.id, m && m[1]));
   on(/^\/unmatched/, (msg) => require('../discovery/discovery').showUnmatched(tenant, msg.chat.id));
 
   // ---------- إيقاف منتج كامل ----------

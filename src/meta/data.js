@@ -30,10 +30,11 @@ async function getAdsetInsightsToday(tenant, accountId) {
   return rows.filter(r => parseFloat(r.spend || 0) > 0);
 }
 
-// على مستوى الحملة لفترة (للـ discovery)
-async function getCampaignInsights(tenant, accountId, datePreset = 'last_7d') {
+// على مستوى الحملة لآخر N يوم شامل النهارده (للـ discovery)
+async function getCampaignInsights(tenant, accountId, days = 7) {
   const rows = await metaGetAll(tenant, `${act(accountId)}/insights`, {
-    fields: 'campaign_id,campaign_name,spend,actions', level: 'campaign', date_preset: datePreset, limit: 200
+    fields: 'campaign_id,campaign_name,spend,actions', level: 'campaign',
+    time_range: JSON.stringify({ since: tenant.daysAgo(days - 1), until: tenant.today() }), limit: 200
   });
   return rows.filter(r => parseFloat(r.spend || 0) > 0);
 }
