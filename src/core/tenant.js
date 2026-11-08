@@ -90,6 +90,16 @@ class Tenant {
     return (s.meta || s.tiktok) && s.products && s.users;
   }
 
+  // ---------- سجل الإجراءات ----------
+  // actor: { via: 'telegram'|'dashboard', chatId }
+  logAction(actor, action, detail = {}) {
+    this.db.mutate(d => {
+      (d.actions ||= []).push({ at: Date.now(), via: actor?.via || 'system', by: String(actor?.chatId || ''), action, ...detail });
+      if (d.actions.length > 1000) d.actions = d.actions.slice(-1000);
+    });
+  }
+  recentActions(limit = 200) { return (this.db.load().actions || []).slice(-limit).reverse(); }
+
   // ---------- سياق الأزرار ----------
   storeContext(data) {
     const key = `c${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;

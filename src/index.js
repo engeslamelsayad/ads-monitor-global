@@ -10,6 +10,7 @@ async function main() {
   logger.info(`  AI: ${config.anthropic.models.heavy} / ${config.anthropic.models.light}`);
   logger.info('====================================');
 
+  await require('./web/server').start();
   admin.start();
   await runtime.startAll();
   scheduler.startAll();

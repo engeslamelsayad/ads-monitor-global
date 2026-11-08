@@ -11,6 +11,20 @@
 
 ---
 
+## الداشبورد 🖥
+
+نفس السيرفر بيشغّل لوحة ويب بالعربي على دومين Railway. التنبيهات بتفضل على Telegram، وأي إعداد يتغير من الداشبورد بيظهر في البوت فوراً والعكس.
+
+- **الدخول**: `/dashboard` في بوت العميل يبعت لينك دخول (صالح 15 دقيقة ومرة واحدة)، وبعدها الجلسة تفضل 7 أيام. `/dashboard` في بوت الأدمن = دخول لكل العملاء مع قائمة للتبديل بينهم.
+- **الأداء**: اليوم / 3 / 7 / 14 / 30 يوم — مقياس CPP مقابل الحد لكل منتج وAd Set، مع إيقاف وتعديل الميزانية مباشرة (الفريق بيتبلغ على Telegram).
+- **المنتجات**: تعديل الحدود والأسماء البديلة في جدول واحد.
+- **الاكتشاف**: كل المنتجات المقترحة في جدول — تعدّل الاسم والحد وتعتمد المختار مرة واحدة.
+- **الحسابات / الإعدادات / الفريق / السجل** (مين عمل إيه وإمتى).
+
+ربط التوكنات نفسه بيفضل من البوت (`/setup`) عشان التوكن ما يعدّيش على المتصفح.
+
+**التفعيل**: Railway ← Service ← Settings ← Networking ← Generate Domain.
+
 ## إضافة عميل جديد (3 دقايق)
 
 1. **@BotFather** ← `/newbot` ← خد التوكن
@@ -37,6 +51,7 @@ Business Settings ← Users ← System Users ← Add (Admin) ← Add Assets (ا�
 | `/invite اسم` | لينك دعوة جديد |
 | `/pause_tenant` / `/resume_tenant` | إيقاف / تشغيل عميل |
 | `/remove_tenant اسم` | حذف عميل (بتأكيد) |
+| `/dashboard` | دخول الداشبورد لكل العملاء |
 | `/check_all` | فحص فوري لكل العملاء |
 | `/announce نص` | رسالة لكل مستخدمي كل العملاء |
 
@@ -47,7 +62,7 @@ Business Settings ← Users ← System Users ← Add (Admin) ← Add Assets (ا�
 | **متابعة** | `/status` `/top` `/worst` `/budget` `/product اسم` `/week اسم` |
 | **تحكم** | `/pause_product اسم` + أزرار الإيقاف والميزانية في التنبيهات |
 | **AI** | `/ask سؤال` |
-| **إعداد** | `/setup` `/discover` `/discover 30` `/unmatched` |
+| **إعداد** | `/setup` `/discover` `/discover 30` `/unmatched` `/dashboard` |
 | **منتجات** | `/products` `/add_product` `/edit_cpp` `/remove_product` `/add_alias` `/remove_alias` |
 | **حسابات** | `/accounts` `/add_account` `/remove_account` |
 | **نظام** | `/settings` `/set` `/users` `/invite` `/add_user` `/remove_user` `/check` `/help` |
@@ -116,6 +131,7 @@ src/
 │   ├── alerts.js       ← التنبيهات والتقارير
 │   ├── messenger.js    ← الإرسال (fallback تلقائي لو Markdown اترفض)
 │   └── state.js
+├── web/                ← الداشبورد: server / api / auth / public (الواجهة)
 ├── discovery/discovery.js ← /discover و /unmatched
 └── ai/                 ← client / reports / assistant
 scripts/check.js        ← اختبار ذاتي بدون شبكة: npm run check

@@ -19,6 +19,7 @@ const HELP = `🛡 بوت الإدارة
 /pause_tenant اسم — إيقاف عميل مؤقتاً
 /resume_tenant اسم — تشغيل عميل
 /remove_tenant اسم — حذف عميل
+/dashboard — دخول الداشبورد (كل العملاء)
 /check_all — فحص فوري لكل العملاء
 /announce نص — رسالة لكل مستخدمي كل العملاء
 
@@ -54,6 +55,12 @@ function start() {
   });
 
   on(/^\/(start|help)/, (msg) => reply(msg, HELP));
+
+  on(/^\/dashboard/, (msg) => {
+    const link = require('../web/auth').createLoginLink({ role: 'admin', chatId: msg.chat.id });
+    if (!link) return reply(msg, '⚠️ فعّل الدومين العام: Railway ← Settings ← Networking ← Generate Domain');
+    return reply(msg, `🖥 دخول الداشبورد كأدمن (كل العملاء) — صالح 15 دقيقة ومرة واحدة:\n${link}`, { disable_web_page_preview: true });
+  });
 
   on(/^\/new_tenant\s+(\d+:[A-Za-z0-9_-]+)\s+(.+)/, async (msg, m) => {
     // مسح رسالة التوكن من الشات

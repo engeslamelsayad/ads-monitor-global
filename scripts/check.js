@@ -223,6 +223,98 @@ const ok = (name) => { passed++; console.log('✅', name); };
   assert(handlersMap.find(([re]) => re.test('/discover'))[0].exec('/discover')[1] === undefined);
   ok('discovery period: Meta time_range, TikTok 30-day chunks summed, /discover N');
 
-  console.log(`\n🎉 ${passed}/13 checks passed`);
+
+  // 14) الداشبورد: الدخول، CSRF، الصلاحيات، الـ API
+  process.env.DASHBOARD_URL = 'http://dash.test';
+  const webAuth = require('../src/web/auth');
+  const http = require('http');
+  const app = require('../src/web/server').createApp();
+  const srv = await new Promise(r => { const s2 = app.listen(0, () => r(s2)); });
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  const req = (method, p, { body, cookie, csrf = true, tenantHdr } = {}) => new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const h = { ...(data ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(csrf ? { 'X-Requested-With': 'dashboard' } : {}), ...(tenantHdr ? { 'X-Tenant': tenantHdr } : {}) };
+    const r = http.request(base + p, { method, headers: h }, res => {
+      let b = ''; res.on('data', c => b += c); res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch {} resolve({ status: res.statusCode, headers: res.headers, json: j, text: b }); });
+    });
+    r.on('error', reject); if (data) r.write(data); r.end();
+  });
+
+  // بدون دخول
+  assert.strictEqual((await req('GET', '/api/me')).status, 401);
+  // اللينك
+  const link = webAuth.createLoginLink({ role: 'tenant', tenantId: t.id, chatId: '890006956' });
+  assert(link.startsWith('http://dash.test/auth?t='));
+  const tok = link.split('t=')[1];
+  const login = await req('GET', `/auth?t=${tok}`);
+  assert.strictEqual(login.status, 302);
+  const cookie = login.headers['set-cookie'][0].split(';')[0];
+  assert(login.headers['set-cookie'][0].includes('HttpOnly'));
+  // اللينك مرة واحدة
+  const again = await req('GET', `/auth?t=${tok}`);
+  assert(again.headers.location.includes('expired'));
+  // الهوية
+  const me = await req('GET', '/api/me', { cookie });
+  assert.strictEqual(me.json.role, 'tenant'); assert.strictEqual(me.json.tenant.id, t.id);
+  assert(!JSON.stringify(me.json).includes('META-TOKEN'), 'no secrets in /me');
+  // CSRF: POST من غير الهيدر مرفوض
+  assert.strictEqual((await req('POST', '/api/products', { cookie, csrf: false, body: { name: 'x', maxCpp: 5 } })).status, 403);
+  // الأداء
+  const ov = await req('GET', '/api/overview?days=7', { cookie });
+  assert.strictEqual(ov.status, 200);
+  assert(ov.json.products.some(p => p.name === 'خرز' && p.cpp === 80));
+  assert(ov.json.adsets.find(a => a.id === 'a1').budget === 500);
+  // المنتجات: إضافة / تعارض / تعديل اسم (القديم يبقى اسم بديل) / حذف
+  assert.strictEqual((await req('POST', '/api/products', { cookie, body: { name: 'فطريات', maxCpp: 110, aliases: ['الفطريات', 'خرز'] } })).status, 400, 'alias clash rejected');
+  assert.strictEqual((await req('POST', '/api/products', { cookie, body: { name: 'فطريات', maxCpp: 110, aliases: ['الفطريات'] } })).status, 200);
+  const ren = await req('PUT', `/api/products/${encodeURIComponent('فطريات')}`, { cookie, body: { name: 'سيروم الفطريات', maxCpp: 100 } });
+  const fp = ren.json.products.find(p => p.name === 'سيروم الفطريات');
+  assert(fp && fp.maxCpp === 100 && fp.aliases.includes('فطريات'));
+  assert.strictEqual((await req('DELETE', `/api/products/${encodeURIComponent('سيروم الفطريات')}`, { cookie })).status, 200);
+  // الإعدادات: قيمة غلط مرفوضة كلها، صح تتحفظ
+  const cdBefore = t.settings.cooldownHours;
+  assert.strictEqual((await req('PUT', '/api/settings', { cookie, body: { values: { cooldown: 5, buffer: 999 } } })).status, 400);
+  assert.strictEqual(t.settings.cooldownHours, cdBefore, 'invalid batch must not partially apply');
+  assert.strictEqual((await req('PUT', '/api/settings', { cookie, body: { values: { cooldown: 5, report_time: '23:15', timezone: 'Asia/Dubai' } } })).status, 200);
+  assert(t.settings.cooldownHours === 5 && t.settings.reportTime === '23:15' && t.settings.timezone === 'Asia/Dubai');
+  t.setSetting('timezone', 'Africa/Cairo');
+  assert.strictEqual((await req('PUT', '/api/settings', { cookie, body: { values: { timezone: 'Mars/Base' } } })).status, 400);
+  // إجراء ميزانية من الداشبورد → سجل الإجراءات + إخطار الفريق
+  const metaActions = require('../src/meta/actions');
+  metaActions.reduceBudget = async (tt, id, p) => ({ success: true, oldBudget: 500, newBudget: 500 * (1 - p / 100), adsetName: 'خرز adset' });
+  const notified = [];
+  t.bot = { sendMessage: async (id, text) => { notified.push([String(id), text]); return { message_id: 1 }; } };
+  const bud = await req('POST', '/api/adsets/a1/budget', { cookie, body: { pct: -30 } });
+  assert.strictEqual(bud.status, 200); assert.strictEqual(bud.json.to, 350);
+  assert(notified.some(([, txt]) => txt.includes('من الداشبورد')));
+  const logs = await req('GET', '/api/logs', { cookie });
+  assert(logs.json.actions[0].action === 'budget_down' && logs.json.actions[0].via === 'dashboard');
+  assert.strictEqual((await req('POST', '/api/adsets/a1/budget', { cookie, body: { pct: -95 } })).status, 400);
+  assert.strictEqual((await req('POST', '/api/adsets/nope/pause', { cookie })).status, 404);
+  // مستخدم اتشال → الجلسة تتقفل
+  const link2 = webAuth.createLoginLink({ role: 'tenant', tenantId: t.id, chatId: '555' });
+  const c2 = (await req('GET', `/auth?t=${link2.split('t=')[1]}`)).headers['set-cookie'][0].split(';')[0];
+  assert.strictEqual((await req('GET', '/api/me', { cookie: c2 })).status, 200);
+  assert.strictEqual((await req('DELETE', '/api/users/555', { cookie })).status, 200);
+  assert.strictEqual((await req('GET', '/api/me', { cookie: c2 })).status, 401);
+  // ما ينفعش يحذف نفسه
+  assert.strictEqual((await req('DELETE', '/api/users/890006956', { cookie })).status, 400);
+  // الأدمن: يشوف كل العملاء ويبدّل بينهم؛ والأدمن اللي مش في القائمة مرفوض
+  const config = require('../src/config');
+  config.admin.chatIds.splice(0, config.admin.chatIds.length, '111');
+  const t2 = registry.add({ name: 'Second Client', botToken: '999:XYZ' });
+  const la = webAuth.createLoginLink({ role: 'admin', chatId: '111' });
+  const ca = (await req('GET', `/auth?t=${la.split('t=')[1]}`)).headers['set-cookie'][0].split(';')[0];
+  const ma = await req('GET', '/api/me', { cookie: ca, tenantHdr: t2.id });
+  assert(ma.json.role === 'admin' && ma.json.tenants.length === 2 && ma.json.tenant.id === t2.id);
+  config.admin.chatIds.splice(0);
+  assert.strictEqual((await req('GET', '/api/me', { cookie: ca })).status, 401);
+  // الواجهة نفسها + الهيدرز الأمنية
+  const page = await req('GET', '/', { csrf: false });
+  assert(page.status === 200 && page.text.includes('app.js') && page.headers['content-security-policy'] && page.headers['x-frame-options'] === 'DENY');
+  srv.close();
+  ok('dashboard API: magic link single-use, CSRF, permissions, products, settings, budget action + team notify, admin switch');
+
+  console.log(`\n🎉 ${passed}/14 checks passed`);
   fs.rmSync(process.env.DATA_DIR, { recursive: true, force: true });
 })().catch(err => { console.error('❌ CHECK FAILED:', err); process.exit(1); });

@@ -40,6 +40,8 @@ const HELP = (t) => `🤖 ${t.name} — مراقبة إعلانات Meta & TikTo
 /add_account meta|tiktok ID
 /remove_account meta|tiktok ID
 
+🖥 /dashboard — لينك دخول الداشبورد
+
 ⚙️ النظام
 /settings — الإعدادات الحالية
 /set إعداد قيمة — تعديل إعداد
@@ -47,18 +49,7 @@ const HELP = (t) => `🤖 ${t.name} — مراقبة إعلانات Meta & TikTo
 /add_user ID | /remove_user ID
 /check — فحص فوري الآن`;
 
-// إعدادات /set المسموحة
-const SETTINGS = {
-  cooldown: { key: 'cooldownHours', label: 'الانتظار بين تنبيهات نفس الـ Ad Set', unit: 'ساعة', min: 1, max: 24 },
-  buffer: { key: 'bufferPct', label: 'التنبيه عند تجاوز', unit: '% من Max CPP', min: 100, max: 200 },
-  min_purchases: { key: 'minPurchases', label: 'أقل مشتريات قبل حساب CPP', unit: 'مشترية', min: 1, max: 20 },
-  high_spend: { key: 'highSpendPct', label: 'تنبيه إنفاق بدون مبيعات عند', unit: '% من Max CPP', min: 100, max: 1000 },
-  scale: { key: 'scalePct', label: 'فرصة Scale عند CPP أقل من', unit: '% من Max CPP', min: 10, max: 95 },
-  budget_floor: { key: 'budgetFloor', label: 'أدنى ميزانية يومية', unit: '', min: 1, max: 100000 },
-  report_time: { key: 'reportTime', label: 'وقت التقرير اليومي', unit: '', pattern: /^([01]\d|2[0-3]):[0-5]\d$/ },
-  currency: { key: 'currency', label: 'رمز العملة', unit: '', pattern: /^.{1,8}$/ },
-  timezone: { key: 'timezone', label: 'المنطقة الزمنية', unit: '', pattern: /^[A-Za-z_]+\/[A-Za-z_]+$/ }
-};
+const { SETTINGS, validate } = require('../core/settings');
 
 function register(tenant) {
   const bot = tenant.bot;
@@ -74,6 +65,7 @@ function register(tenant) {
     }
   };
   const on = (re, fn) => bot.onText(re, guard(fn));
+  const actor = (msg) => ({ via: 'telegram', chatId: String(msg.chat.id) });
 
   // ---------- /start [inviteCode] ----------
   bot.onText(/^\/start(?:\s+(\S+))?/, async (msg, match) => {
@@ -116,6 +108,13 @@ function register(tenant) {
     return sendLong(tenant, msg.chat.id, answer);
   });
 
+  on(/^\/dashboard/, (msg) => {
+    const link = require('../web/auth').createLoginLink({ role: 'tenant', tenantId: tenant.id, chatId: msg.chat.id });
+    if (!link) return reply(msg, '⚠️ الداشبورد مش متاح لسه — المسؤول محتاج يفعّل الدومين العام على Railway.');
+    return reply(msg, `🖥 لينك دخول الداشبورد (لك إنت بس — صالح 15 دقيقة ومرة واحدة):\n${link}\n\nبعد الدخول هتفضل مسجّل 7 أيام على نفس المتصفح.`,
+      { disable_web_page_preview: true });
+  });
+
   on(/^\/setup/, (msg) => require('./setup').start(tenant, msg.chat.id));
   on(/^\/discover(?:\s+(\d+))?/, (msg, m) => require('../discovery/discovery').start(tenant, msg.chat.id, m && m[1]));
   on(/^\/unmatched/, (msg) => require('../discovery/discovery').showUnmatched(tenant, msg.chat.id));
@@ -153,6 +152,7 @@ function register(tenant) {
     if (!name || !(max > 0)) return reply(msg, '❌ الصيغة: /add_product اسم المنتج الحد\nمثال: /add_product خرز 55');
     if (tenant.products.some(p => p.name === name)) return reply(msg, `❌ "${name}" موجود — استخدم /edit_cpp`);
     tenant.saveProducts([...tenant.products, { name, maxCpp: max, aliases: [] }]);
+    tenant.logAction(actor(msg), 'product_add', { product: name, maxCpp: max });
     return reply(msg, `✅ تم إضافة ${name} — Max CPP: ${max}\nإجمالي المنتجات: ${tenant.products.length}`);
   });
 
@@ -163,6 +163,7 @@ function register(tenant) {
     if (!p || !(max > 0)) return reply(msg, '❌ الصيغة: /edit_cpp اسم المنتج الحد');
     const old = p.maxCpp;
     tenant.saveProducts(tenant.products.map(x => (x.name === p.name ? { ...x, maxCpp: max } : x)));
+    tenant.logAction(actor(msg), 'product_cpp', { product: p.name, from: old, to: max });
     return reply(msg, `✅ ${p.name}: ${old} → ${max}`);
   });
 
@@ -185,6 +186,7 @@ function register(tenant) {
     }
     const aliases = adding ? [...(p.aliases || []), b] : (p.aliases || []).filter(x => x !== b);
     tenant.saveProducts(tenant.products.map(x => (x.name === p.name ? { ...x, aliases } : x)));
+    tenant.logAction(actor(msg), adding ? 'alias_add' : 'alias_remove', { product: p.name, alias: b });
     return reply(msg, `✅ ${p.name}\nالأسماء البديلة: ${aliases.join(' ، ') || 'لا يوجد'}`);
   };
   on(/^\/add_alias (.+)/, aliasCmd(true));
@@ -222,19 +224,12 @@ function register(tenant) {
   });
 
   on(/^\/set (\w+) (.+)/, (msg, m) => {
-    const d = SETTINGS[m[1]];
-    if (!d) return reply(msg, `❌ إعداد غير معروف. المتاح:\n${Object.keys(SETTINGS).join(', ')}`);
-    const raw = m[2].trim();
-    let value;
-    if (d.pattern) {
-      if (!d.pattern.test(raw)) return reply(msg, '❌ قيمة غير صالحة');
-      value = raw;
-    } else {
-      value = parseFloat(raw);
-      if (isNaN(value) || value < d.min || value > d.max) return reply(msg, `❌ القيمة لازم تكون بين ${d.min} و ${d.max}`);
-    }
-    tenant.setSetting(d.key, value);
-    return reply(msg, `✅ ${d.label}: ${value} ${d.unit}`);
+    if (!SETTINGS[m[1]]) return reply(msg, `❌ إعداد غير معروف. المتاح:\n${Object.keys(SETTINGS).join(', ')}`);
+    const r = validate(m[1], m[2]);
+    if (!r.ok) return reply(msg, `❌ ${r.error}`);
+    tenant.setSetting(r.def.key, r.value);
+    tenant.logAction(actor(msg), 'setting', { name: m[1], value: r.value });
+    return reply(msg, `✅ ${r.def.label}: ${r.value} ${r.def.unit}`);
   });
 
   // ---------- المستخدمون ----------
@@ -302,6 +297,7 @@ async function handleConfigCallback(tenant, q) {
   let text;
   if (c.cfg === 'rmprod') {
     tenant.saveProducts(tenant.products.filter(p => p.name !== c.name));
+    tenant.logAction({ via: 'telegram', chatId }, 'product_remove', { product: c.name });
     text = `✅ تم حذف ${c.name}\nالمنتجات المتبقية: ${tenant.products.length}`;
   } else if (c.cfg === 'rmacct') {
     const list = c.platform === 'meta' ? tenant.metaAccounts : tenant.tiktokAdvertisers;
@@ -309,7 +305,12 @@ async function handleConfigCallback(tenant, q) {
     text = `✅ تمت إزالة ${c.platform} ${c.id}`;
   } else if (c.cfg === 'rmuser') {
     if (tenant.users.length <= 1) text = '❌ لا يمكن حذف آخر مستخدم';
-    else { tenant.saveUsers(tenant.users.filter(u => u !== c.id)); text = `✅ تم حذف ${c.id}`; }
+    else {
+      tenant.saveUsers(tenant.users.filter(u => u !== c.id));
+      require('../web/auth').revokeUser(tenant.id, c.id);
+      tenant.logAction({ via: 'telegram', chatId }, 'user_remove', { user: c.id });
+      text = `✅ تم حذف ${c.id}`;
+    }
   }
   return edit(tenant, chatId, q.message.message_id, text || '❌ إجراء غير معروف', { plain: true });
 }

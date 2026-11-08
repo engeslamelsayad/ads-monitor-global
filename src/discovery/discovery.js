@@ -88,40 +88,47 @@ function validateGroups(groups, unmatched, allCampaigns) {
   }).filter(g => g.campaigns.length).sort((a, b) => b.spend - a.spend);
 }
 
-// ---------- 3) بدء الجلسة ----------
-async function start(t, chatId, requestedDays) {
+// ---------- 3) التحليل (مشترك بين البوت والداشبورد) ----------
+// يرجع { days, total, matched, unmatched, groups, errors } — groups = [] لو مفيش جديد
+async function analyze(t, requestedDays) {
   const days = Math.min(Math.max(parseInt(requestedDays) || DEFAULT_DAYS, 1), MAX_DAYS);
+  if (!t.setupStatus.meta && !t.setupStatus.tiktok) throw new Error('اربط Meta أو TikTok الأول');
+  const { campaigns, errors } = await collectCampaigns(t, days);
+  if (errors.length) t.log.warn(`Discovery errors: ${errors.join(' | ')}`);
+  const unmatched = campaigns.filter(c => !t.matchProduct(c.name));
+  const base = { days, total: campaigns.length, matched: campaigns.length - unmatched.length, unmatched, errors, groups: [] };
+  if (!unmatched.length) return base;
+  const ai = await clusterWithAI(t, unmatched);
+  return { ...base, groups: validateGroups(ai.groups || [], unmatched, campaigns) };
+}
+
+// ---------- 3b) جلسة البوت ----------
+async function start(t, chatId, requestedDays) {
   if (!t.setupStatus.meta && !t.setupStatus.tiktok) {
     return send(t, chatId, '⚠️ اربط Meta أو TikTok الأول — /setup', { plain: true });
   }
-  const wait = await send(t, chatId, `🔍 جاري استكشاف الحملات اللي صرفت آخر ${days} يوم...`, { plain: true });
-  const { campaigns, errors } = await collectCampaigns(t, days);
-  if (errors.length) t.log.warn(`Discovery errors: ${errors.join(' | ')}`);
-  if (!campaigns.length) {
-    return edit(t, chatId, wait.message_id, `لا توجد حملات صرفت آخر ${days} يوم.${errors.length ? `\n\n⚠️ ${errors.join('\n')}` : ''}`, { plain: true });
-  }
+  const days = Math.min(Math.max(parseInt(requestedDays) || DEFAULT_DAYS, 1), MAX_DAYS);
+  const wait = await send(t, chatId, `🔍 جاري استكشاف الحملات اللي صرفت آخر ${days} يوم وتجميعها في منتجات...`, { plain: true });
 
-  const unmatched = campaigns.filter(c => !t.matchProduct(c.name));
-  const matchedCount = campaigns.length - unmatched.length;
-  if (!unmatched.length) {
-    return edit(t, chatId, wait.message_id, `✅ كل الحملات (${campaigns.length}) متطابقة مع منتجاتك — مفيش حاجة جديدة.`, { plain: true });
-  }
-
-  await edit(t, chatId, wait.message_id,
-    `📋 لقيت ${campaigns.length} حملة: ${matchedCount} متطابقة و ${unmatched.length} جديدة\n🤖 جاري تجميعها في منتجات...`, { plain: true });
-
-  let groups;
+  let r;
   try {
-    const ai = await clusterWithAI(t, unmatched);
-    groups = validateGroups(ai.groups || [], unmatched, campaigns);
+    r = await analyze(t, days);
   } catch (err) {
-    t.log.error('Discovery AI failed', err);
-    return send(t, chatId, `❌ تعذّر التجميع التلقائي: ${err.message}\n\nالحملات الجديدة:\n${unmatched.slice(0, 20).map(c => `• ${c.name}`).join('\n')}\n\nضيفها يدوياً: /add_product اسم حد`, { plain: true });
+    t.log.error('Discovery failed', err);
+    return edit(t, chatId, wait.message_id, `❌ تعذّر الاكتشاف: ${err.message}\n\nتقدر تضيف المنتجات يدوياً: /add_product اسم حد`, { plain: true });
   }
-  if (!groups.length) return send(t, chatId, '🤷 مقدرتش أحدد منتجات واضحة من الأسماء — ضيفها يدوياً بـ /add_product', { plain: true });
-
-  const key = t.storeContext({ dv: true, days, groups, idx: 0, added: [], linked: [], skipped: [] });
-  await send(t, chatId, `✨ لقيت ${groups.length} منتج مقترح — هنراجعهم واحد واحد 👇`, { plain: true });
+  if (!r.total) {
+    return edit(t, chatId, wait.message_id, `لا توجد حملات صرفت آخر ${days} يوم.${r.errors.length ? `\n\n⚠️ ${r.errors.join('\n')}` : ''}`, { plain: true });
+  }
+  if (!r.unmatched.length) {
+    return edit(t, chatId, wait.message_id, `✅ كل الحملات (${r.total}) متطابقة مع منتجاتك — مفيش حاجة جديدة.`, { plain: true });
+  }
+  if (!r.groups.length) {
+    return edit(t, chatId, wait.message_id, '🤷 مقدرتش أحدد منتجات واضحة من الأسماء — ضيفها يدوياً بـ /add_product', { plain: true });
+  }
+  await edit(t, chatId, wait.message_id,
+    `📋 ${r.total} حملة: ${r.matched} متطابقة و ${r.unmatched.length} جديدة\n✨ لقيت ${r.groups.length} منتج مقترح — هنراجعهم واحد واحد 👇`, { plain: true });
+  const key = t.storeContext({ dv: true, days, groups: r.groups, idx: 0, added: [], linked: [], skipped: [] });
   return showCard(t, chatId, key);
 }
 
@@ -282,4 +289,4 @@ async function showUnmatched(t, chatId) {
   });
 }
 
-module.exports = { start, handleCallback, handleText, showUnmatched, validateGroups };
+module.exports = { start, analyze, addProduct, linkToExisting, handleCallback, handleText, showUnmatched, validateGroups, DEFAULT_DAYS, MAX_DAYS };

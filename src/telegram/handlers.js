@@ -1,27 +1,10 @@
 const { send, edit, sendToAll } = require('./messenger');
 const { fmt, escapeMd, adsetLabel } = require('../utils/format');
-const metaActions = require('../meta/actions');
-const ttActions = require('../tiktok/actions');
+const actions = require('../core/actions');
 const state = require('./state');
 
-// ==================== توجيه الإجراءات حسب المنصة ====================
-
-const isTT = (ctx) => ctx.platform === 'tiktok' || String(ctx.adsetId).startsWith('tt_');
-const rawId = (ctx) => String(ctx.adsetId).replace(/^tt_/, '');
-
-const act = {
-  pause: (t, c) => (isTT(c) ? ttActions.pauseAdgroup(t, c.accountId, rawId(c)) : metaActions.pauseAdset(t, c.adsetId)),
-  reduce: (t, c, p) => (isTT(c) ? ttActions.reduceBudget(t, c.accountId, rawId(c), p) : metaActions.reduceBudget(t, c.adsetId, p)),
-  increase: (t, c, p) => (isTT(c) ? ttActions.increaseBudget(t, c.accountId, rawId(c), p) : metaActions.increaseBudget(t, c.adsetId, p)),
-  budget: (t, c) => (isTT(c) ? ttActions.getAdgroupBudget(t, c.accountId, rawId(c)) : metaActions.getAdsetBudget(t, c.adsetId))
-};
-
-// إخطار باقي المستخدمين بأي إجراء تم
-async function notifyOthers(tenant, actorChatId, text) {
-  for (const cid of tenant.users) {
-    if (cid !== String(actorChatId)) await send(tenant, cid, text, { plain: true }).catch(() => {});
-  }
-}
+const act = actions.api;
+const tg = (chatId) => ({ via: 'telegram', chatId: String(chatId) });
 
 const expired = (tenant, chatId) => send(tenant, chatId, '❌ انتهت صلاحية هذا الطلب (أكثر من 48 ساعة). انتظر تنبيهاً جديداً.', { plain: true });
 
@@ -57,9 +40,8 @@ async function handleCallback(tenant, query) {
 
     case 'cpause':
       try {
-        const r = await act.pause(tenant, ctx);
-        await edit(tenant, chatId, msgId, `✅ تم إيقاف ${label}\n\n📑 ${r.newName}\n🗂 ${ctx.campaignName}`, { plain: true });
-        return notifyOthers(tenant, chatId, `⏸ تم إيقاف ${label}\n📑 ${r.newName}\n👤 بواسطة: ${chatId}`);
+        const r = await actions.pause(tenant, ctx, tg(chatId));
+        return edit(tenant, chatId, msgId, `✅ تم إيقاف ${label}\n\n📑 ${r.newName}\n🗂 ${ctx.campaignName}`, { plain: true });
       } catch (err) {
         tenant.log.error('Pause failed', err);
         return edit(tenant, chatId, msgId, `❌ فشل الإيقاف\n\n${err.message}`, { plain: true });
@@ -100,11 +82,10 @@ async function handleCallback(tenant, query) {
     case 'cscale':
       try {
         const p = parseInt(arg);
-        const r = await act.increase(tenant, ctx, p);
+        const r = await actions.changeBudget(tenant, ctx, p, tg(chatId));
         if (!r.success) return edit(tenant, chatId, msgId, `❌ تعذّر رفع الميزانية\n\n${r.error}`, { plain: true });
-        await edit(tenant, chatId, msgId,
+        return edit(tenant, chatId, msgId,
           `✅ تم رفع الميزانية\n\n📑 ${r.adsetName}\n💰 ${fmt.money(r.oldBudget)} → ${fmt.money(r.newBudget)} ${cur} (+${p}%)`, { plain: true });
-        return notifyOthers(tenant, chatId, `🚀 تم رفع ميزانية\n📑 ${r.adsetName}\n+${p}% → ${fmt.money(r.newBudget)} ${cur}\n👤 بواسطة: ${chatId}`);
       } catch (err) {
         tenant.log.error('Scale up failed', err);
         return edit(tenant, chatId, msgId, `❌ خطأ: ${err.message}`, { plain: true });
@@ -118,6 +99,7 @@ async function handleCallback(tenant, query) {
       for (const [, m] of ids) {
         try {
           await act.pause(tenant, { platform: m.platform, accountId: m.account_id, adsetId: m.adset_id });
+          tenant.logAction(tg(chatId), 'pause', { adset: m.adset_name, adsetId: m.adset_id, product: ctx.productName, platform: m.platform });
           ok.push(m.adset_name);
         } catch { failed.push(m.adset_name); }
         await new Promise(r => setTimeout(r, 400));
@@ -126,7 +108,7 @@ async function handleCallback(tenant, query) {
       if (ok.length) t += `تم (${ok.length}):\n${ok.map(n => `• ${n}`).join('\n')}\n`;
       if (failed.length) t += `\n❌ فشل (${failed.length}):\n${failed.map(n => `• ${n}`).join('\n')}`;
       await edit(tenant, chatId, msgId, t, { plain: true });
-      return notifyOthers(tenant, chatId, `⏸ تم إيقاف ${ok.length} لمنتج ${ctx.productName}\n👤 بواسطة: ${chatId}`);
+      return actions.notifyTeam(tenant, tg(chatId), `⏸ تم إيقاف ${ok.length} لمنتج ${ctx.productName}\n👤 بواسطة: ${chatId}`);
     }
 
     default:
@@ -136,13 +118,12 @@ async function handleCallback(tenant, query) {
 
 async function applyReduce(tenant, chatId, msgId, ctx, pct) {
   try {
-    const r = await act.reduce(tenant, ctx, pct);
+    const r = await actions.changeBudget(tenant, ctx, -pct, tg(chatId));
     const text = r.success
       ? `✅ تم تقليل الميزانية\n\n📑 ${r.adsetName}\n💰 ${fmt.money(r.oldBudget)} → ${fmt.money(r.newBudget)} ${tenant.currency} (-${pct}%)`
       : `❌ تعذّر تقليل الميزانية\n\n${r.error}`;
     if (msgId) await edit(tenant, chatId, msgId, text, { plain: true });
     else await send(tenant, chatId, text, { plain: true });
-    if (r.success) await notifyOthers(tenant, chatId, `💰 تم تقليل ميزانية\n📑 ${r.adsetName}\n-${pct}% → ${fmt.money(r.newBudget)}\n👤 بواسطة: ${chatId}`);
   } catch (err) {
     tenant.log.error('Budget reduce failed', err);
     await send(tenant, chatId, `❌ فشلت العملية: ${err.message}`, { plain: true });
